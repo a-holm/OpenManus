@@ -500,7 +500,7 @@ class LLM:
         self,
         messages: List[Union[dict, Message]],
         system_msgs: Optional[List[Union[dict, Message]]] = None,
-        timeout: int = 300,
+        timeout: int = 3000,
         tools: Optional[List[dict]] = None,
         tool_choice: TOOL_CHOICE_TYPE = ToolChoice.AUTO,  # type: ignore
         temperature: Optional[float] = None,
@@ -612,7 +612,9 @@ class LLM:
                 logger.error("Authentication failed. Check API key.")
             elif isinstance(oe, RateLimitError):
                 logger.error("Rate limit exceeded. Consider increasing retry attempts.")
+                time.sleep(60)
             elif isinstance(oe, APIError):
+                logger.error(f"Content: {response}")
                 logger.error(f"API error: {oe}")
             raise
         except Exception as e:

@@ -19,7 +19,7 @@ class ReActAgent(BaseAgent, ABC):
     memory: Memory = Field(default_factory=Memory)
     state: AgentState = AgentState.IDLE
 
-    max_steps: int = 10
+    max_steps: int = 100
     current_step: int = 0
 
     @abstractmethod

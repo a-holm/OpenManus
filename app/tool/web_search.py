@@ -28,8 +28,8 @@ class WebSearch(BaseTool):
             },
             "num_results": {
                 "type": "integer",
-                "description": "(optional) The number of search results to return. Default is 10.",
-                "default": 10,
+                "description": "(optional) The number of search results to return. Default is 100.",
+                "default": 100,
             },
         },
         "required": ["query"],
@@ -40,7 +40,7 @@ class WebSearch(BaseTool):
         "duckduckgo": DuckDuckGoSearchEngine(),
     }
 
-    async def execute(self, query: str, num_results: int = 10) -> List[str]:
+    async def execute(self, query: str, num_results: int = 100) -> List[str]:
         """
         Execute a Web search and return a list of URLs.
         Tries engines in order based on configuration, falling back if an engine fails with errors.
@@ -48,7 +48,7 @@ class WebSearch(BaseTool):
 
         Args:
             query (str): The search query to submit to the search engine.
-            num_results (int, optional): The number of search results to return. Default is 10.
+            num_results (int, optional): The number of search results to return. Default is 100.
 
         Returns:
             List[str]: A list of URLs matching the search query.
