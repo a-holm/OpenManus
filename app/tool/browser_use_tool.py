@@ -8,6 +8,7 @@ from browser_use.browser.context import BrowserContext, BrowserContextConfig
 from browser_use.dom.service import DomService
 from pydantic import Field, field_validator
 from pydantic_core.core_schema import ValidationInfo
+import markdownify
 
 from app.config import config
 from app.tool.base import BaseTool, ToolResult
@@ -223,8 +224,9 @@ class BrowserUseTool(BaseTool):
 
                 elif action == "get_html":
                     html = await context.get_page_html()
+                    markdown = markdownify.markdownify(html)
                     truncated = (
-                        html[:MAX_LENGTH] + "..." if len(html) > MAX_LENGTH else html
+                        markdown[:MAX_LENGTH] + "..." if len(markdown) > MAX_LENGTH else markdown
                     )
                     return ToolResult(output=truncated)
 
