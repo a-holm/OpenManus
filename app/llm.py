@@ -618,5 +618,6 @@ class LLM:
                 logger.error(f"API error: {oe}")
             raise
         except Exception as e:
+            logger.info(f"Response: {response}")
             logger.error(f"Unexpected error in ask_tool: {e}")
             raise
