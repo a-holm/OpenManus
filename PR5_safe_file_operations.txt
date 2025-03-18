@@ -1,0 +1,524 @@
+# PR: Safe File Operations and Output Management
+
+This PR introduces improvements to file operations in OpenManus to ensure safer, non-destructive file handling. It creates a structured output management system and makes file appending the default behavior to prevent accidental data loss.
+
+## Problem Statement
+
+The current implementation has several limitations:
+1. Files can be easily overwritten without any versioning or backup
+2. No standardized output directory structure for generated content
+3. Limited append capabilities for incrementally building results
+4. No built-in file safety mechanisms like versioning or backups
+5. Lack of consistency in file operation error handling
+
+## Proposed Changes
+
+### 1. Create Enhanced Output Management System
+**File:** `/app/util/output_manager.py` (new)
+
+```python
+import os
+import csv
+import json
+import shutil
+from datetime import datetime
+from pathlib import Path
+from typing import Any, Dict, List, Optional, Union
+
+from app.config import PROJECT_ROOT
+
+
+class OutputManager:
+    """Manages output file operations with safety mechanisms"""
+
+    def __init__(self, base_dir: Optional[Path] = None):
+        # Set up base output directory
+        self.base_dir = base_dir or (PROJECT_ROOT / "output")
+        self.base_dir.mkdir(exist_ok=True)
+        
+        # Create subdirectories for different content types
+        self.dirs = {
+            "text": self.base_dir / "text",
+            "data": self.base_dir / "data",
+            "images": self.base_dir / "images",
+            "code": self.base_dir / "code",
+            "logs": self.base_dir / "logs",
+        }
+        
+        for dir_path in self.dirs.values():
+            dir_path.mkdir(exist_ok=True)
+    
+    def get_safe_path(
+        self, 
+        file_path: Union[str, Path], 
+        category: str = "text",
+        create_dirs: bool = True
+    ) -> Path:
+        """
+        Gets a safe path for file operations, ensuring directories exist.
+        Converts relative paths to be within the appropriate output directory.
+        
+        Args:
+            file_path: Relative or absolute path for the file
+            category: Category of output (text, data, images, code, logs)
+            create_dirs: Whether to create parent directories
+            
+        Returns:
+            Path object for the safe output location
+        """
+        path = Path(file_path)
+        
+        # Handle absolute vs relative paths
+        if path.is_absolute():
+            # For absolute paths, extract filename and place in appropriate output dir
+            filename = path.name
+            target_dir = self.dirs.get(category, self.base_dir)
+            safe_path = target_dir / filename
+        else:
+            # For relative paths, place directly in the appropriate category dir
+            target_dir = self.dirs.get(category, self.base_dir)
+            safe_path = target_dir / path
+        
+        # Ensure parent directories exist if requested
+        if create_dirs and not safe_path.parent.exists():
+            safe_path.parent.mkdir(parents=True, exist_ok=True)
+            
+        return safe_path
+    
+    def save_text(
+        self, 
+        content: str, 
+        file_path: Union[str, Path], 
+        append: bool = True, 
+        make_backup: bool = True,
+        category: str = "text"
+    ) -> str:
+        """
+        Saves text content to a file with safety mechanisms.
+        
+        Args:
+            content: Text content to save
+            file_path: Path where the file should be saved
+            append: Whether to append to existing file (True) or overwrite (False)
+            make_backup: Whether to create backup before overwriting
+            category: Content category for directory organization
+            
+        Returns:
+            Path to the saved file
+        """
+        safe_path = self.get_safe_path(file_path, category)
+        
+        # Create backup if requested and file exists
+        if make_backup and safe_path.exists() and not append:
+            self._create_backup(safe_path)
+        
+        # Determine write mode
+        mode = "a" if append and safe_path.exists() else "w"
+        
+        # Add newline if appending and file exists
+        if append and safe_path.exists() and safe_path.stat().st_size > 0:
+            content = "\n" + content
+        
+        # Write content
+        safe_path.parent.mkdir(parents=True, exist_ok=True)
+        safe_path.write_text(content if mode == "w" else safe_path.read_text() + content)
+        
+        return str(safe_path)
+    
+    def save_csv(
+        self, 
+        data: List[Dict[str, Any]], 
+        file_path: Union[str, Path], 
+        append: bool = True,
+        make_backup: bool = True,
+        headers: Optional[List[str]] = None
+    ) -> str:
+        """
+        Saves data to a CSV file with option to append rows.
+        
+        Args:
+            data: List of dictionaries to save as CSV rows
+            file_path: Path where the CSV file should be saved
+            append: Whether to append to existing file
+            make_backup: Whether to create backup before modifying
+            headers: Optional list of column headers (if None, derived from data)
+            
+        Returns:
+            Path to the saved CSV file
+        """
+        safe_path = self.get_safe_path(file_path, "data")
+        
+        # Create backup if requested and file exists
+        if make_backup and safe_path.exists() and not append:
+            self._create_backup(safe_path)
+        
+        # Determine headers if not provided
+        if not headers and data:
+            headers = list(data[0].keys())
+        
+        # Handle appending to existing CSV
+        mode = "a" if append and safe_path.exists() else "w"
+        include_headers = mode == "w" or not safe_path.exists()
+        
+        # Write CSV data
+        safe_path.parent.mkdir(parents=True, exist_ok=True)
+        
+        with safe_path.open(mode, newline='') as f:
+            writer = csv.DictWriter(f, fieldnames=headers)
+            if include_headers:
+                writer.writeheader()
+            writer.writerows(data)
+        
+        return str(safe_path)
+    
+    def save_json(
+        self, 
+        data: Any, 
+        file_path: Union[str, Path], 
+        append: bool = False,
+        make_backup: bool = True,
+        indent: int = 2
+    ) -> str:
+        """
+        Saves data to a JSON file with option to append to array.
+        
+        Args:
+            data: Data to save as JSON 
+            file_path: Path where the JSON file should be saved
+            append: Whether to append to existing JSON array
+            make_backup: Whether to create backup before modifying
+            indent: Number of spaces for JSON indentation
+            
+        Returns:
+            Path to the saved JSON file
+        """
+        safe_path = self.get_safe_path(file_path, "data")
+        
+        # Create backup if requested and file exists
+        if make_backup and safe_path.exists():
+            self._create_backup(safe_path)
+        
+        # Handle appending to existing JSON
+        existing_data = None
+        if append and safe_path.exists():
+            try:
+                with safe_path.open('r') as f:
+                    existing_data = json.load(f)
+            except json.JSONDecodeError:
+                # If not valid JSON, don't append
+                existing_data = None
+        
+        # Prepare final data
+        if append and isinstance(existing_data, list):
+            # Append to existing list
+            if isinstance(data, list):
+                final_data = existing_data + data
+            else:
+                final_data = existing_data + [data]
+        elif append and isinstance(existing_data, dict) and isinstance(data, dict):
+            # Merge dictionaries
+            final_data = {**existing_data, **data}
+        else:
+            # Overwrite with new data
+            final_data = data
+        
+        # Write JSON data
+        safe_path.parent.mkdir(parents=True, exist_ok=True)
+        with safe_path.open('w') as f:
+            json.dump(final_data, f, indent=indent)
+        
+        return str(safe_path)
+    
+    def _create_backup(self, file_path: Path) -> Path:
+        """Creates a timestamped backup of the specified file"""
+        if not file_path.exists():
+            return None
+            
+        # Generate backup filename with timestamp
+        timestamp = datetime.now().strftime("%Y%m%d%H%M%S")
+        backup_path = file_path.with_name(f"{file_path.stem}_{timestamp}{file_path.suffix}")
+        
+        # Create backup
+        shutil.copy2(file_path, backup_path)
+        
+        return backup_path
+```
+
+### 2. Update FileSaver Tool with Enhanced Safety Features
+**File:** `/app/tool/file_saver.py`
+
+```python
+import os
+from pathlib import Path
+from typing import Optional
+
+import aiofiles
+
+from app.config import WORKSPACE_ROOT
+from app.tool.base import BaseTool
+from app.util.output_manager import OutputManager
+
+
+class FileSaver(BaseTool):
+    name: str = "file_saver"
+    description: str = """Save content to a local file at a specified path.
+Use this tool when you need to save text, code, or generated content to a file on the local filesystem.
+The tool accepts content and a file path, and saves the content to that location.
+By default, it appends to existing files rather than overwriting them.
+"""
+    parameters: dict = {
+        "type": "object",
+        "properties": {
+            "content": {
+                "type": "string",
+                "description": "(required) The content to save to the file.",
+            },
+            "file_path": {
+                "type": "string",
+                "description": "(required) The path where the file should be saved, including filename and extension.",
+            },
+            "mode": {
+                "type": "string",
+                "description": "(optional) The file opening mode. Default is 'a' for append. Use 'w' for overwrite.",
+                "enum": ["a", "w"],
+                "default": "a",
+            },
+            "category": {
+                "type": "string",
+                "description": "(optional) The category for organizing output (text, data, code, images, logs).",
+                "enum": ["text", "data", "code", "images", "logs"],
+                "default": "text",
+            },
+            "make_backup": {
+                "type": "boolean",
+                "description": "(optional) Whether to create a backup before overwriting existing file.",
+                "default": True,
+            },
+        },
+        "required": ["content", "file_path"],
+    }
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.output_manager = OutputManager(WORKSPACE_ROOT / "output")
+
+    async def execute(
+        self, 
+        content: str, 
+        file_path: str, 
+        mode: str = "a",
+        category: str = "text",
+        make_backup: bool = True
+    ) -> str:
+        """
+        Save content to a file at the specified path.
+
+        Args:
+            content (str): The content to save to the file.
+            file_path (str): The path where the file should be saved.
+            mode (str, optional): The file opening mode. Default is 'a' for append. Use 'w' for overwrite.
+            category (str, optional): The category for organizing output.
+            make_backup (bool, optional): Whether to create a backup before overwriting.
+
+        Returns:
+            str: A message indicating the result of the operation.
+        """
+        try:
+            # Use output manager to safely save content
+            file_path_obj = Path(file_path)
+            append = mode == "a"
+            
+            # Handle absolute paths specially
+            if os.path.isabs(file_path):
+                # Extract the filename and use only that part for the output location
+                file_name = os.path.basename(file_path)
+                actual_path = self.output_manager.save_text(
+                    content=content, 
+                    file_path=file_name, 
+                    append=append,
+                    make_backup=make_backup,
+                    category=category
+                )
+            else:
+                # Use the path as provided within the output directory
+                actual_path = self.output_manager.save_text(
+                    content=content, 
+                    file_path=file_path, 
+                    append=append,
+                    make_backup=make_backup,
+                    category=category
+                )
+
+            operation = "Appended to" if append else "Overwrote"
+            return f"Content successfully {operation.lower()} {actual_path}"
+        except Exception as e:
+            return f"Error saving file: {str(e)}"
+```
+
+### 3. Add CSV-Specific File Saver Tool
+**File:** `/app/tool/csv_saver.py` (new)
+
+```python
+from typing import Dict, List, Optional, Union
+
+from app.config import WORKSPACE_ROOT
+from app.tool.base import BaseTool
+from app.util.output_manager import OutputManager
+
+
+class CSVSaver(BaseTool):
+    name: str = "csv_saver"
+    description: str = """Save data to a CSV file at a specified path.
+Use this tool when you need to save tabular data to a CSV file on the local filesystem.
+The tool accepts a list of dictionaries (rows) and saves them to the specified CSV file.
+By default, it appends to existing files rather than overwriting them.
+"""
+    parameters: dict = {
+        "type": "object",
+        "properties": {
+            "data": {
+                "type": "array",
+                "description": "(required) The data to save as rows in the CSV file.",
+                "items": {
+                    "type": "object"
+                }
+            },
+            "file_path": {
+                "type": "string",
+                "description": "(required) The path where the CSV file should be saved.",
+            },
+            "append": {
+                "type": "boolean",
+                "description": "(optional) Whether to append to existing file. Default is True.",
+                "default": True,
+            },
+            "headers": {
+                "type": "array",
+                "description": "(optional) List of column headers to use.",
+                "items": {
+                    "type": "string"
+                }
+            },
+            "make_backup": {
+                "type": "boolean",
+                "description": "(optional) Whether to create a backup before overwriting existing file.",
+                "default": True,
+            },
+        },
+        "required": ["data", "file_path"],
+    }
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.output_manager = OutputManager(WORKSPACE_ROOT / "output")
+
+    async def execute(
+        self, 
+        data: List[Dict[str, any]], 
+        file_path: str, 
+        append: bool = True,
+        headers: Optional[List[str]] = None,
+        make_backup: bool = True
+    ) -> str:
+        """
+        Save data to a CSV file at the specified path.
+
+        Args:
+            data: List of dictionaries to save as CSV rows
+            file_path: Path where the CSV file should be saved
+            append: Whether to append to existing file
+            headers: Optional list of column headers
+            make_backup: Whether to create backup before modifying
+            
+        Returns:
+            str: A message indicating the result of the operation.
+        """
+        try:
+            # Safety check for empty data
+            if not data:
+                return "No data provided to save. CSV file operation aborted."
+                
+            # Extract only the filename if absolute path
+            if file_path.startswith('/'):
+                file_name = file_path.split('/')[-1]
+                if not file_name.endswith('.csv'):
+                    file_name += '.csv'
+            else:
+                file_name = file_path
+                if not file_name.endswith('.csv'):
+                    file_name += '.csv'
+            
+            # Save CSV data
+            actual_path = self.output_manager.save_csv(
+                data=data,
+                file_path=file_name,
+                append=append,
+                make_backup=make_backup,
+                headers=headers
+            )
+            
+            operation = "Appended to" if append else "Overwrote"
+            rows_count = len(data)
+            return f"Successfully {operation.lower()} {rows_count} rows to {actual_path}"
+        except Exception as e:
+            return f"Error saving CSV file: {str(e)}"
+```
+
+### 4. Add Configuration Options for File Operations
+**File:** `/app/config.py`
+
+Add a new configuration section for file operations:
+
+```python
+class FileSettings(BaseModel):
+    """Configuration for file operations"""
+    default_append: bool = Field(True, description="Whether to append by default")
+    make_backups: bool = Field(True, description="Create backups before overwriting files")
+    output_dir: Optional[str] = Field(None, description="Custom output directory")
+    max_backups: int = Field(5, description="Maximum number of backups to keep per file")
+    
+# Update AppConfig to include file settings
+class AppConfig(BaseModel):
+    llm: Dict[str, LLMSettings]
+    browser_config: Optional[BrowserSettings] = Field(
+        None, description="Browser configuration"
+    )
+    search_config: Optional[SearchSettings] = Field(
+        None, description="Search configuration"
+    )
+    file_config: Optional[FileSettings] = Field(
+        None, description="File operation configuration"
+    )
+```
+
+## Implementation Plan
+
+1. First, create the OutputManager utility class for safe file operations
+2. Update the FileSaver tool to use OutputManager and make append the default
+3. Add the new CSVSaver tool for tabular data
+4. Add the necessary configuration options
+5. Update the main run_flow.py file to ensure output directory exists
+
+## Expected Benefits
+
+1. **Safer Operations**: Files are not overwritten by default, preventing data loss
+2. **Organized Output**: Files are saved in category-specific directories for better organization
+3. **Better Data Handling**: Specialized tools for different data types (text, CSV, etc.)
+4. **Backup Functionality**: Critical files are backed up before being modified
+5. **Standardized Locations**: All output goes to a consistent, structured location
+
+## Testing Strategy
+
+- Add unit tests for the OutputManager utility
+- Test append behavior with various file types
+- Verify backup functionality works correctly
+- Test edge cases like permissions issues and invalid paths
+- Create integration tests with realistic agent scenarios
+
+## Future Improvements
+
+- Add tools for other file formats (JSON, XML, etc.)
+- Implement file versioning for critical outputs
+- Add file diff capabilities to compare versions
+- Create a cleanup utility to manage old backups
+- Add support for compressed archives of output data

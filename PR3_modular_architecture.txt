@@ -1,0 +1,459 @@
+# PR: Modular Architecture and Code Organization Improvements
+
+This PR introduces architectural improvements to enhance code organization, maintainability, and extensibility. These changes establish clearer boundaries between components, reduce duplication, and improve the overall structure.
+
+## Problem Statement
+
+The current codebase has several organizational issues:
+1. Tight coupling between components makes testing and extension difficult
+2. Mixed responsibilities in key classes (LLM, agents, tools)
+3. Inconsistent patterns for error handling and configuration
+4. Code duplication across similar components
+5. Unclear boundaries between agent types and tool implementations
+
+## Proposed Changes
+
+### 1. Create Proper Interface Definitions
+**File:** `/app/interfaces.py` (new)
+
+Add protocol definitions for major components to establish clear boundaries:
+
+```python
+from abc import ABC, abstractmethod
+from typing import Any, Dict, List, Optional, Protocol, runtime_checkable
+
+from app.schema import Message
+
+
+@runtime_checkable
+class LanguageModelProtocol(Protocol):
+    """Protocol defining the interface for language model providers"""
+    
+    async def ask(self, messages: List[Message], **kwargs) -> Any:
+        """Generate a text response from the given messages"""
+        ...
+    
+    async def ask_tool(self, messages: List[Message], tools: List[Dict], **kwargs) -> Any:
+        """Generate a tool-calling response from the given messages"""
+        ...
+    
+    async def count_tokens(self, text: str) -> int:
+        """Count the number of tokens in the given text"""
+        ...
+
+
+@runtime_checkable
+class ToolProtocol(Protocol):
+    """Protocol defining the interface for tools"""
+    name: str
+    description: str
+    parameters: Dict
+    
+    async def execute(self, **kwargs) -> Any:
+        """Execute the tool with the given parameters"""
+        ...
+    
+    def to_param(self) -> Dict:
+        """Convert the tool to a parameter format for LLM API"""
+        ...
+
+
+class AgentBase(ABC):
+    """Base abstract class for all agents"""
+    
+    @abstractmethod
+    async def run(self, request: Optional[str] = None) -> str:
+        """Run the agent with the given request"""
+        ...
+    
+    @abstractmethod
+    async def step(self) -> str:
+        """Execute a single step of the agent"""
+        ...
+```
+
+### 2. Refactor LLM Class to Single Responsibility
+**File:** `/app/llm/base.py` (new)
+
+Split the monolithic LLM class into smaller focused components:
+
+```python
+from typing import Dict, List, Optional
+
+from app.config import LLMSettings, config
+from app.interfaces import LanguageModelProtocol
+from app.schema import Message
+
+
+class BaseLLM(LanguageModelProtocol):
+    """Base class for language model implementations"""
+    
+    def __init__(
+        self, config_name: str = "default", llm_config: Optional[LLMSettings] = None
+    ):
+        self.config_name = config_name
+        self.llm_config = llm_config or config.llm
+        self._setup()
+    
+    def _setup(self):
+        """Initialize the language model client"""
+        raise NotImplementedError("Subclasses must implement _setup()")
+    
+    async def ask(self, messages: List[Message], **kwargs) -> Dict:
+        """Generate a text response from the given messages"""
+        raise NotImplementedError("Subclasses must implement ask()")
+    
+    async def ask_tool(self, messages: List[Message], tools: List[Dict], **kwargs) -> Dict:
+        """Generate a tool-calling response from the given messages"""
+        raise NotImplementedError("Subclasses must implement ask_tool()")
+    
+    async def count_tokens(self, text: str) -> int:
+        """Count the number of tokens in the given text"""
+        raise NotImplementedError("Subclasses must implement count_tokens()")
+```
+
+**File:** `/app/llm/openai.py` (new)
+
+Implement OpenAI-specific LLM functionality:
+
+```python
+from typing import Dict, List, Optional, Union
+
+import tiktoken
+from openai import AsyncOpenAI, AsyncAzureOpenAI
+from tenacity import (
+    retry,
+    retry_if_exception_type,
+    stop_after_attempt,
+    wait_random_exponential,
+)
+
+from app.exceptions import TokenLimitExceeded
+from app.llm.base import BaseLLM
+from app.schema import Message, ToolChoice
+
+
+class OpenAILLM(BaseLLM):
+    """OpenAI implementation of the LLM interface"""
+    
+    def _setup(self):
+        """Initialize the OpenAI client"""
+        if self.llm_config.api_type.lower() == "azureopenai":
+            self.client = AsyncAzureOpenAI(
+                api_key=self.llm_config.api_key,
+                api_version=self.llm_config.api_version,
+                azure_endpoint=self.llm_config.base_url,
+            )
+        else:
+            self.client = AsyncOpenAI(
+                api_key=self.llm_config.api_key,
+                base_url=self.llm_config.base_url,
+            )
+        
+        # Set up token counting
+        try:
+            self.tokenizer = tiktoken.encoding_for_model(self.llm_config.model)
+        except KeyError:
+            self.tokenizer = tiktoken.get_encoding("cl100k_base")
+    
+    @retry(
+        retry=retry_if_exception_type(
+            (Exception,)  # Retry on specific exceptions
+        ),
+        wait=wait_random_exponential(min=1, max=60),
+        stop=stop_after_attempt(3),
+    )
+    async def ask(self, messages: List[Message], **kwargs) -> Dict:
+        """Generate a text response from the given messages"""
+        # Convert to OpenAI message format
+        system_msgs = kwargs.pop("system_msgs", None) or []
+        openai_messages = self._prepare_messages(messages, system_msgs)
+        
+        # Check token limits
+        await self._check_token_limit(openai_messages)
+        
+        # Send request to OpenAI
+        response = await self.client.chat.completions.create(
+            model=self.llm_config.model,
+            messages=openai_messages,
+            max_tokens=self.llm_config.max_tokens,
+            temperature=self.llm_config.temperature,
+            **kwargs,
+        )
+        
+        return {
+            "content": response.choices[0].message.content,
+            "role": "assistant",
+        }
+    
+    # Other methods would be implemented similarly...
+```
+
+### 3. Create a Dependency Injection Container 
+**File:** `/app/container.py` (new)
+
+Implement a simple DI container to manage service dependencies:
+
+```python
+from typing import Any, Dict, Type
+
+from app.config import config
+from app.interfaces import LanguageModelProtocol
+from app.llm.openai import OpenAILLM
+
+
+class Container:
+    """Simple dependency injection container"""
+    
+    def __init__(self):
+        self._services = {}
+        self._factories = {}
+        self._register_defaults()
+    
+    def _register_defaults(self):
+        """Register default service implementations"""
+        # Register LLM factory
+        self.register_factory(LanguageModelProtocol, lambda container, name="default": 
+            OpenAILLM(name, config.llm)
+        )
+    
+    def register(self, interface: Type, implementation: Any):
+        """Register a service implementation"""
+        self._services[interface] = implementation
+    
+    def register_factory(self, interface: Type, factory):
+        """Register a factory function for a service"""
+        self._factories[interface] = factory
+    
+    def resolve(self, interface: Type, **kwargs) -> Any:
+        """Resolve a service implementation"""
+        # Check for cached instance
+        if interface in self._services:
+            return self._services[interface]
+        
+        # Check for factory
+        if interface in self._factories:
+            instance = self._factories[interface](self, **kwargs)
+            # Cache the instance if no kwargs were provided
+            if not kwargs:
+                self._services[interface] = instance
+            return instance
+        
+        raise ValueError(f"No implementation registered for {interface}")
+
+
+# Global container instance
+container = Container()
+```
+
+### 4. Refactor Search Tools to Use Common Interface
+**File:** `/app/tool/search/interface.py` (new)
+
+Create a common interface for all search engines:
+
+```python
+from abc import ABC, abstractmethod
+from typing import Dict, List
+
+from pydantic import BaseModel, Field
+
+
+class SearchResult(BaseModel):
+    """Standardized search result format"""
+    title: str = Field(..., description="Title of the search result")
+    url: str = Field(..., description="URL of the search result")
+    snippet: str = Field(..., description="Snippet or description of the search result")
+    source: str = Field(..., description="Source of the search result")
+
+
+class SearchEngine(ABC):
+    """Base class for all search engines"""
+    
+    @abstractmethod
+    async def search(self, query: str, num_results: int = 5) -> List[SearchResult]:
+        """Execute a search with the given query"""
+        pass
+    
+    def format_results(self, results: List[SearchResult]) -> str:
+        """Format search results for display"""
+        if not results:
+            return "No results found."
+        
+        formatted = [f"Search results for query:"]
+        for i, result in enumerate(results, 1):
+            formatted.append(f"\n{i}. {result.title}")
+            formatted.append(f"   URL: {result.url}")
+            formatted.append(f"   {result.snippet}")
+        
+        return "\n".join(formatted)
+```
+
+### 5. Refactor Tool Collection to Improve Organization
+**File:** `/app/tool/tool_collection.py`
+
+Improve the tool collection for better organization:
+
+```python
+from typing import Any, Dict, List, Optional, Type
+
+from app.exceptions import ToolError
+from app.interfaces import ToolProtocol
+from app.tool.base import BaseTool, ToolFailure, ToolResult
+
+
+class ToolCategory:
+    """Enumeration of tool categories"""
+    SYSTEM = "system"
+    BROWSER = "browser"
+    FILE = "file"
+    SEARCH = "search"
+    EXECUTE = "execute"
+    UTILITY = "utility"
+
+
+class ToolCollection:
+    """A collection of defined tools with better organization"""
+
+    def __init__(self, *tools: BaseTool):
+        self.tools = tools
+        self.tool_map = {tool.name: tool for tool in tools}
+        self.categories = {}
+        self._categorize_tools()
+    
+    def _categorize_tools(self):
+        """Organize tools into categories"""
+        # Initialize categories
+        for category in vars(ToolCategory).values():
+            if isinstance(category, str) and not category.startswith("_"):
+                self.categories[category] = []
+        
+        # Categorize tools
+        for tool in self.tools:
+            category = getattr(tool, "category", ToolCategory.UTILITY)
+            if category in self.categories:
+                self.categories[category].append(tool)
+    
+    def get_by_category(self, category: str) -> List[BaseTool]:
+        """Get all tools in a specific category"""
+        return self.categories.get(category, [])
+    
+    def __iter__(self):
+        return iter(self.tools)
+    
+    def to_params(self) -> List[Dict[str, Any]]:
+        return [tool.to_param() for tool in self.tools]
+
+    async def execute(
+        self, *, name: str, tool_input: Dict[str, Any] = None
+    ) -> ToolResult:
+        tool = self.tool_map.get(name)
+        if not tool:
+            return ToolFailure(error=f"Tool {name} is invalid")
+        try:
+            result = await tool(**(tool_input or {}))
+            return result
+        except ToolError as e:
+            return ToolFailure(error=str(e))
+
+    def get_tool(self, name: str) -> Optional[BaseTool]:
+        return self.tool_map.get(name)
+    
+    def get_tool_by_type(self, tool_type: Type) -> Optional[BaseTool]:
+        """Get the first tool instance of a specific type"""
+        for tool in self.tools:
+            if isinstance(tool, tool_type):
+                return tool
+        return None
+
+    def add_tool(self, tool: BaseTool):
+        self.tools += (tool,)
+        self.tool_map[tool.name] = tool
+        # Update categories
+        category = getattr(tool, "category", ToolCategory.UTILITY)
+        if category in self.categories:
+            self.categories[category].append(tool)
+        return self
+```
+
+### 6. Improve Base Tool Implementation
+**File:** `/app/tool/base.py`
+
+Enhance the base tool implementation:
+
+```python
+from abc import ABC, abstractmethod
+from typing import Any, Dict, Optional
+
+from pydantic import BaseModel, Field
+
+from app.interfaces import ToolProtocol
+
+
+class BaseTool(ABC, BaseModel, ToolProtocol):
+    """Improved base class for all tools"""
+    
+    name: str
+    description: str
+    parameters: Optional[dict] = None
+    category: str = "utility"  # Default category
+    
+    class Config:
+        arbitrary_types_allowed = True
+    
+    async def __call__(self, **kwargs) -> Any:
+        """Execute the tool with given parameters."""
+        return await self.execute(**kwargs)
+    
+    @abstractmethod
+    async def execute(self, **kwargs) -> Any:
+        """Execute the tool with given parameters."""
+        pass
+    
+    def to_param(self) -> Dict:
+        """Convert tool to function call format."""
+        return {
+            "type": "function",
+            "function": {
+                "name": self.name,
+                "description": self.description,
+                "parameters": self.parameters or {
+                    "type": "object",
+                    "properties": {},
+                },
+            },
+        }
+```
+
+## Implementation Plan
+
+1. First, create the interface definitions to establish clear boundaries
+2. Refactor the LLM class into a proper interface with implementations
+3. Create the dependency injection container
+4. Refactor the search tools to use a common interface
+5. Enhance the tool collection for better organization
+6. Update agents to use the new interfaces and container
+7. Add unit tests for each new component
+
+## Expected Benefits
+
+1. **Improved Testability**: Clear interfaces enable proper mocking and unit testing
+2. **Better Maintainability**: Single responsibility classes are easier to understand
+3. **Enhanced Extensibility**: Adding new LLM providers or tools becomes trivial
+4. **More Organized Code**: Logical grouping makes navigating the codebase easier
+5. **Reduced Duplication**: Common patterns extracted into shared implementations
+6. **Better Type Safety**: Proper interface definitions improve type checking
+
+## Testing Strategy
+
+- Add unit tests for each interface implementation
+- Create mock implementations of interfaces for testing
+- Verify component interactions with integration tests
+- Test new dependency injection container functionality
+
+## Future Improvements
+
+These changes provide the foundation for further improvements:
+1. Migrate to fully async code consistently throughout the codebase
+2. Implement proper logging strategy with structured logs
+3. Add metrics and observability hooks at interface boundaries
+4. Create a plugin system based on the new interfaces

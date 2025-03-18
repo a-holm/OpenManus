@@ -1,0 +1,370 @@
+# PR: Enhancing Task Persistence in OpenManus
+
+This PR addresses an issue where OpenManus sometimes terminates tasks prematurely before reaching the maximum step count. The changes focus on improving the agent's persistence, creativity, and thoroughness when working on tasks.
+
+## Overview of Changes
+
+The modifications focus on four key areas:
+1. Enhancing the agent's self-evaluation of task completion
+2. Improving "stuck" detection with more sophisticated mechanisms
+3. Adding task reassessment prompts to guide the agent when progress slows
+4. Creating a progress tracking system to better monitor task completion
+
+## Detailed Changes
+
+### 1. Modify ToolCall Agent's `_should_finish_execution` method
+**File:** `/app/agent/toolcall.py`
+
+Current implementation is too simplistic:
+```python
+@staticmethod
+def _should_finish_execution(**kwargs) -> bool:
+    """Determine if tool execution should finish the agent"""
+    return True
+```
+
+Proposed change:
+```python
+def _should_finish_execution(self, name: str, result: Any, **kwargs) -> bool:
+    """Determine if tool execution should finish the agent"""
+    # Only terminate if explicitly called and task is truly complete
+    if name.lower() != "terminate":
+        return False
+        
+    # Get the original user request
+    original_request = next((msg.content for msg in self.memory.messages if msg.role == "user"), None)
+    if not original_request:
+        return True
+        
+    # Ask LLM to evaluate if the task is truly complete
+    completion_check = self._evaluate_task_completion(original_request, result)
+    if not completion_check.get("is_complete", True):
+        # Add a reflection message to reconsider approach
+        reflection = completion_check.get("reflection", "Let's try a different approach to complete this task.")
+        self.update_memory("system", reflection)
+        return False
+        
+    return True
+    
+async def _evaluate_task_completion(self, original_request: str, result: str) -> dict:
+    """Evaluate if the task is truly complete based on the original request"""
+    # First summarize the recent conversation context
+    recent_messages = self.memory.messages[-10:]
+    
+    # Get a summary of what's been done so far
+    try:
+        context_msgs = [msg for msg in recent_messages if msg.content and hasattr(msg, 'role')]
+        if context_msgs:
+            summary_prompt = f"""Summarize the key actions and findings from this conversation in 2-3 sentences.
+            Focus on what tools were used and what was discovered or accomplished."""
+            
+            summary_response = await self.llm.ask(
+                messages=context_msgs + [Message.user_message(summary_prompt)],
+                system_msgs=[Message.system_message("You create concise summaries of conversations.")],
+            )
+            context_summary = summary_response.content
+        else:
+            context_summary = "No significant actions taken yet."
+    except Exception as e:
+        logger.error(f"Error summarizing context: {e}")
+        context_summary = "Context summarization failed."
+    
+    # Now use the summary in the evaluation prompt
+    evaluation_prompt = f"""
+    Original request: {original_request}
+    
+    What's been done so far: {context_summary}
+    
+    Evaluate if this task is truly complete. Consider:
+    1. Have all parts of the request been addressed?
+    2. Was the execution thorough and comprehensive?
+    3. Are there alternative approaches that could yield better results?
+    4. Did we explore sufficiently or stop too early?
+    
+    Return JSON: {{"is_complete": boolean, "reflection": "guidance if incomplete"}}
+    """
+    
+    try:
+        response = await self.llm.ask(
+            messages=[Message.user_message(evaluation_prompt)],
+            system_msgs=[Message.system_message("You are a critical evaluator determining if a task is truly complete.")],
+        )
+        
+        # Parse the JSON response
+        import json
+        import re
+        
+        # Extract JSON from response in case it's embedded in text
+        json_match = re.search(r'\{.*\}', response.content, re.DOTALL)
+        if json_match:
+            result_json = json.loads(json_match.group(0))
+            return result_json
+        
+        # Default to completing if parsing fails
+        return {"is_complete": True}
+    except Exception as e:
+        logger.error(f"Error evaluating task completion: {e}")
+        return {"is_complete": True}  # Default to completing on error
+```
+
+### 2. Enhance the "stuck" detection in BaseAgent
+**File:** `/app/agent/base.py`
+
+Current implementation only checks for exact duplicates:
+```python
+def is_stuck(self) -> bool:
+    """Check if the agent is stuck in a loop by detecting duplicate content"""
+    if len(self.memory.messages) < 2:
+        return False
+
+    last_message = self.memory.messages[-1]
+    if not last_message.content:
+        return False
+
+    # Count identical content occurrences
+    duplicate_count = sum(
+        1
+        for msg in reversed(self.memory.messages[:-1])
+        if msg.role == "assistant" and msg.content == last_message.content
+    )
+
+    return duplicate_count >= self.duplicate_threshold
+```
+
+Proposed change:
+```python
+def is_stuck(self) -> bool:
+    """Enhanced method to detect when agent is stuck in a loop or making no progress"""
+    if len(self.memory.messages) < 5:  # Need enough history to detect patterns
+        return False
+
+    last_message = self.memory.messages[-1]
+    if not last_message.content:
+        return False
+        
+    # Check for identical content repetition (existing logic)
+    duplicate_count = sum(
+        1
+        for msg in reversed(self.memory.messages[:-1])
+        if msg.role == "assistant" and msg.content == last_message.content
+    )
+    
+    if duplicate_count >= self.duplicate_threshold:
+        return True
+        
+    # Check for tool execution patterns - detect if using same tool repeatedly without progress
+    if len(self.memory.messages) >= 10:  # Need reasonable history
+        tool_pattern = []
+        for msg in reversed(self.memory.messages[-10:]):
+            if hasattr(msg, 'tool_calls') and msg.tool_calls:
+                for call in msg.tool_calls:
+                    if hasattr(call, 'function') and hasattr(call.function, 'name'):
+                        tool_pattern.append(call.function.name)
+        
+        # Check if same tool used 3+ times consecutively
+        if len(tool_pattern) >= 3:
+            if len(set(tool_pattern[:3])) == 1:  # Same tool 3 times in a row
+                return True
+    
+    # No indicators of being stuck
+    return False
+```
+
+### 3. Improve stuck state handling with more specific guidance
+**File:** `/app/agent/base.py`
+
+Current implementation adds general prompt:
+```python
+def handle_stuck_state(self):
+    """Handle stuck state by adding a prompt to change strategy"""
+    stuck_prompt = "\
+    Observed duplicate responses. Consider new strategies and avoid repeating ineffective paths already attempted."
+    self.next_step_prompt = f"{stuck_prompt}\n{self.next_step_prompt}"
+    logger.warning(f"Agent detected stuck state. Added prompt: {stuck_prompt}")
+```
+
+Proposed change:
+```python
+def handle_stuck_state(self):
+    """Enhanced handling of stuck states with specific guidance"""
+    # Get original user request for context
+    original_request = next((msg.content for msg in self.memory.messages if msg.role == "user"), None)
+    
+    # Different strategies based on what might be causing the stuck state
+    if len(self.memory.messages) >= 10:
+        # Extract recent tool usage pattern
+        recent_tools = []
+        for msg in reversed(self.memory.messages[-10:]):
+            if hasattr(msg, 'tool_calls') and msg.tool_calls:
+                for call in msg.tool_calls:
+                    if hasattr(call, 'function') and hasattr(call.function, 'name'):
+                        recent_tools.append(call.function.name)
+        
+        # Detect pattern and provide specific guidance
+        if recent_tools and len(set(recent_tools[:3])) == 1:
+            stuck_tool = recent_tools[0]
+            stuck_prompt = f"""
+            I notice you've been repeatedly using the {stuck_tool} tool with limited progress.
+            Consider these alternative approaches:
+            1. Break down the problem differently - what smaller steps could help?
+            2. Try using a different tool or combination of tools
+            3. Revisit the original request: "{original_request}"
+            4. Consider if we need more information to proceed
+            
+            Remember, the goal is to be thorough and resourceful in completing the user's request.
+            """
+        else:
+            # Generic stuck state
+            stuck_prompt = f"""
+            You seem to be repeating similar approaches without making progress.
+            Step back and reconsider the original request: "{original_request}"
+            
+            Think creatively about:
+            1. Different ways to break down this problem
+            2. Alternative tools or methods you haven't tried
+            3. Additional information you might need to gather
+            4. Whether a completely different approach might work better
+            
+            Be persistent and thorough in completing the user's request.
+            """
+    else:
+        # Default stuck prompt for shorter conversations
+        stuck_prompt = f"""
+        I've noticed we might not be making progress. Let's try a different approach.
+        Original request: "{original_request}"
+        
+        Consider alternative strategies and avoid repeating ineffective paths.
+        """
+    
+    # Add to next step prompt
+    self.next_step_prompt = f"{stuck_prompt}\n{self.next_step_prompt}"
+    logger.warning(f"Agent detected stuck state. Added guidance prompt.")
+```
+
+### 4. Add Progress Tracking to BaseAgent
+**File:** `/app/agent/base.py`
+
+New additions to track progress and prevent premature termination:
+
+```python
+# Add to class attributes
+progress: float = Field(0.0, description="Estimated task completion percentage")
+no_progress_count: int = Field(0, description="Counter for steps with no progress")
+detailed_progress_tracking: bool = Field(True, description="Whether to track detailed progress")
+
+# Add new method for progress tracking
+async def update_progress(self) -> float:
+    """Update and return the task completion progress percentage"""
+    if not self.detailed_progress_tracking:
+        # Simple heuristic: progress = steps / max_steps
+        self.progress = min(1.0, self.current_step / self.max_steps)
+        return self.progress
+    
+    # Get original user request
+    original_request = next((msg.content for msg in self.memory.messages if msg.role == "user"), None)
+    if not original_request:
+        return 0.0
+    
+    # Create progress estimation prompt
+    progress_prompt = f"""
+    Original request: {original_request}
+    
+    Based on the steps taken so far, estimate the completion percentage (0-100%) for this task.
+    Consider:
+    1. How many subtasks have been completed vs. remaining
+    2. The depth and thoroughness of the exploration
+    3. If there are diminishing returns on continued effort
+    
+    Return only a number between 0-100 representing percentage complete.
+    """
+    
+    try:
+        response = await self.llm.ask(
+            messages=[Message.user_message(progress_prompt)],
+            system_msgs=[Message.system_message("You estimate task completion percentages.")],
+        )
+        
+        # Extract percentage from response
+        import re
+        match = re.search(r'(\d+)%?', response.content)
+        if match:
+            percentage = float(match.group(1))
+            self.progress = min(100.0, percentage) / 100.0
+            
+            # If progress hasn't increased in 3 steps and we're >80% done, might be time to finish
+            prev_progress = getattr(self, '_prev_progress', 0.0)
+            if self.progress <= prev_progress:
+                self.no_progress_count += 1
+            else:
+                self.no_progress_count = 0
+            
+            self._prev_progress = self.progress
+            
+            logger.info(f"Task progress: {self.progress*100:.1f}% (No progress count: {self.no_progress_count})")
+            return self.progress
+    except Exception as e:
+        logger.error(f"Error estimating progress: {e}")
+    
+    # Default fallback to simple heuristic
+    self.progress = min(1.0, self.current_step / self.max_steps)
+    return self.progress
+
+# Modify the step method to include progress tracking
+async def step(self) -> str:
+    """Execute a single step: think, act, and update progress."""
+    result = await super().step()
+    
+    # Update progress after each step
+    await self.update_progress()
+    
+    # If we're making no progress but have made substantial progress overall
+    # add a "final effort" prompt to be thorough
+    if self.no_progress_count >= 2 and self.progress >= 0.8:
+        final_effort_prompt = """
+        We're making good progress but might be nearing diminishing returns.
+        Let's do a final check to ensure we've been thorough:
+        1. Have we addressed all parts of the original request?
+        2. Is there any additional information or action that would improve our response?
+        3. Have we explored all reasonable approaches to this problem?
+        
+        Let's be sure we've been comprehensive before concluding.
+        """
+        
+        self.update_memory("system", final_effort_prompt)
+        
+    return result
+```
+
+### 5. Enhance the Manus System Prompt
+**File:** `/app/prompt/manus.py`
+
+Add a section to the system prompt to encourage persistence:
+
+```python
+SYSTEM_PROMPT = """You are OpenManus, an all-capable AI assistant, aimed at solving any task presented by the user. You have various tools at your disposal that you can call upon to efficiently complete complex requests. Whether it's programming, information retrieval, file processing, or web browsing, you can handle it all.
+
+You are known for your thoroughness and persistence. When given a task, you:
+1. Fully explore multiple approaches before concluding
+2. Break complex problems into manageable steps
+3. Think creatively when faced with obstacles
+4. Continuously reassess progress against the original goal
+5. Only terminate when you've exhausted all reasonable options
+
+You avoid giving up too early and always strive to provide comprehensive solutions to user requests.
+"""
+```
+
+## Testing and Verification
+
+These changes should be tested by running a series of complex tasks that previously terminated early and verifying that:
+
+1. The agent persists longer and explores more options
+2. The progress tracking system correctly identifies task completion
+3. The "stuck" detection correctly identifies repetitive patterns and provides helpful guidance
+4. The agent only terminates when truly done or when reaching maximum steps
+
+## Potential Issues
+
+1. **Increased token usage**: More thorough processing will use more tokens. We should monitor costs.
+2. **Possibly over-persistent**: The agent might continue working on impossible tasks. We may need to tune the thresholds.
+3. **Performance impact**: The additional LLM calls for evaluation and progress tracking will slightly slow execution.

@@ -1,0 +1,465 @@
+# PR: Robust Tool Error Handling and Recovery
+
+This PR introduces a comprehensive error handling framework for tools in OpenManus to improve reliability and resilience. Currently, tool errors are handled inconsistently with minimal context, leading to poor recovery and user experience when tools fail.
+
+## Problem Statement
+
+The current implementation has several limitations:
+1. Basic error handling with generic try/except blocks
+2. No structured taxonomy of errors for better handling
+3. Missing retry mechanisms for transient failures
+4. Insufficient context in error messages for debugging
+5. No graceful degradation when tools fail
+
+## Proposed Changes
+
+### 1. Enhanced Error Class Hierarchy
+**File:** `/app/exceptions.py`
+
+Create a proper error class hierarchy to better classify and handle different types of errors:
+
+```python
+class OpenManusError(Exception):
+    """Base exception for all OpenManus errors"""
+    pass
+
+class TokenLimitExceeded(OpenManusError):
+    """Exception raised when the token limit is exceeded"""
+    pass
+
+class ToolError(OpenManusError):
+    """Base class for all tool-related errors"""
+    def __init__(self, message, tool_name=None, context=None):
+        self.message = message
+        self.tool_name = tool_name
+        self.context = context or {}
+        super().__init__(self.message)
+
+# Network-related errors
+class NetworkError(ToolError):
+    """Errors related to network connectivity issues"""
+    pass
+
+class TimeoutError(NetworkError):
+    """Request timeout errors"""
+    pass
+
+class RateLimitError(NetworkError):
+    """API rate limit errors"""
+    pass
+
+# Tool execution errors
+class ExecutionError(ToolError):
+    """Errors occurring during tool execution"""
+    pass
+
+class InvalidInputError(ExecutionError):
+    """Error when tool receives invalid input"""
+    pass
+
+class ResourceNotFoundError(ExecutionError):
+    """Error when a requested resource is not found"""
+    pass
+
+class PermissionError(ExecutionError):
+    """Error when tool lacks permission to perform an action"""
+    pass
+
+# Recovery-related
+class RetryableError(ToolError):
+    """Base class for errors that can be retried"""
+    def __init__(self, message, tool_name=None, context=None, retry_after=None):
+        super().__init__(message, tool_name, context)
+        self.retry_after = retry_after  # Seconds to wait before retry
+```
+
+### 2. Enhanced Tool Result Structure
+**File:** `/app/tool/base.py`
+
+Improve the `ToolResult` and `ToolFailure` classes to include more context:
+
+```python
+class ToolResult(BaseModel):
+    """Represents the result of a tool execution."""
+    output: Any = Field(default=None)
+    error: Optional[str] = Field(default=None)
+    system: Optional[str] = Field(default=None)
+    # New fields
+    metadata: Dict[str, Any] = Field(default_factory=dict)
+    success: bool = Field(default=True)
+    retry_suggestion: Optional[bool] = Field(default=None)
+    
+    class Config:
+        arbitrary_types_allowed = True
+
+    # Other methods remain the same...
+    
+class ToolFailure(ToolResult):
+    """A ToolResult that represents a failure."""
+    success: bool = False
+    error_type: Optional[str] = Field(default=None)
+    recoverable: bool = Field(default=False)
+    retry_count: int = Field(default=0)
+    retry_max: int = Field(default=3)
+    
+    @classmethod
+    def from_exception(cls, exception: Exception, **kwargs):
+        """Create a ToolFailure from an exception"""
+        if isinstance(exception, ToolError):
+            return cls(
+                error=str(exception.message),
+                error_type=exception.__class__.__name__,
+                metadata=getattr(exception, 'context', {}),
+                recoverable=isinstance(exception, RetryableError),
+                **kwargs
+            )
+        return cls(
+            error=str(exception),
+            error_type=exception.__class__.__name__,
+            **kwargs
+        )
+```
+
+### 3. Retry Mechanism for Tools
+**File:** `/app/tool/tool_collection.py`
+
+Add retry capabilities to the ToolCollection:
+
+```python
+from tenacity import (
+    retry,
+    retry_if_exception_type,
+    stop_after_attempt,
+    wait_random_exponential,
+)
+
+class ToolCollection:
+    """A collection of defined tools."""
+
+    def __init__(self, *tools: BaseTool):
+        self.tools = tools
+        self.tool_map = {tool.name: tool for tool in tools}
+        self.default_retry_config = {
+            "max_attempts": 3,
+            "min_wait": 1,  # seconds
+            "max_wait": 10,  # seconds
+            "retryable_errors": [NetworkError, TimeoutError, RetryableError],
+        }
+
+    # ... existing methods ...
+
+    async def execute(
+        self, *, name: str, tool_input: Dict[str, Any] = None, retry_config=None
+    ) -> ToolResult:
+        tool = self.tool_map.get(name)
+        if not tool:
+            return ToolFailure(error=f"Tool {name} is invalid")
+        
+        # Use tool-specific retry config or default
+        config = retry_config or getattr(tool, "retry_config", self.default_retry_config)
+        
+        return await self._execute_with_retry(tool, tool_input, config)
+    
+    async def _execute_with_retry(self, tool, tool_input, config):
+        """Execute tool with retry logic"""
+        max_attempts = config.get("max_attempts", 3)
+        retry_count = 0
+        last_error = None
+        
+        while retry_count < max_attempts:
+            try:
+                result = await tool(**(tool_input or {}))
+                if retry_count > 0:
+                    # Add retry metadata if we had to retry
+                    if isinstance(result, ToolResult):
+                        result.metadata["retry_count"] = retry_count
+                return result
+                
+            except tuple(config.get("retryable_errors", [RetryableError])) as e:
+                retry_count += 1
+                last_error = e
+                
+                # Calculate backoff time
+                min_wait = config.get("min_wait", 1)
+                max_wait = config.get("max_wait", 10)
+                wait_time = min(max_wait, min_wait * (2 ** (retry_count - 1)))
+                
+                # Log retry attempt
+                from app.logger import logger
+                logger.warning(
+                    f"Tool '{tool.name}' failed with error '{str(e)}'. "
+                    f"Retrying {retry_count}/{max_attempts} after {wait_time}s"
+                )
+                
+                # Wait before retry
+                import asyncio
+                await asyncio.sleep(wait_time)
+                
+            except Exception as e:
+                # Non-retryable error
+                return ToolFailure.from_exception(
+                    e, retry_count=retry_count, tool_name=tool.name
+                )
+        
+        # Exhausted retries
+        return ToolFailure.from_exception(
+            last_error, 
+            retry_count=retry_count,
+            retry_max=max_attempts,
+            tool_name=tool.name
+        )
+```
+
+### 4. Improved Tool Error Handling in ToolCallAgent 
+**File:** `/app/agent/toolcall.py`
+
+Enhance how the agent handles tool failures:
+
+```python
+async def execute_tool(self, command: ToolCall) -> str:
+    """Execute a single tool call with robust error handling"""
+    if not command or not command.function or not command.function.name:
+        return "Error: Invalid command format"
+
+    name = command.function.name
+    if name not in self.available_tools.tool_map:
+        return f"Error: Unknown tool '{name}'"
+
+    try:
+        # Parse arguments
+        args = json.loads(command.function.arguments or "{}")
+
+        # Execute the tool
+        logger.info(f"🔧 Activating tool: '{name}'...")
+        result = await self.available_tools.execute(name=name, tool_input=args)
+
+        # Handle tool failures more robustly
+        if isinstance(result, ToolFailure):
+            error_msg = result.error or "Unknown error"
+            
+            # Add detailed context for better debugging
+            error_details = []
+            if hasattr(result, 'error_type') and result.error_type:
+                error_details.append(f"Error type: {result.error_type}")
+            if hasattr(result, 'retry_count') and result.retry_count:
+                error_details.append(f"Retries attempted: {result.retry_count}")
+            if hasattr(result, 'metadata') and result.metadata:
+                # Extract relevant metadata for the error message
+                if 'status_code' in result.metadata:
+                    error_details.append(f"Status code: {result.metadata['status_code']}")
+                if 'url' in result.metadata:
+                    error_details.append(f"URL: {result.metadata['url']}")
+            
+            error_context = ", ".join(error_details)
+            error_log = f"⚠️ Tool '{name}' failed: {error_msg}" + (f" ({error_context})" if error_context else "")
+            logger.error(error_log)
+            
+            # Provide guidance to the agent on how to recover
+            recovery_suggestions = self._get_recovery_suggestions(name, result)
+            return f"Error using tool '{name}': {error_msg}\n\n{recovery_suggestions}"
+        
+        # Format successful result for display
+        observation = (
+            f"Observed output of cmd `{name}` executed:\n{str(result)}"
+            if result
+            else f"Cmd `{name}` completed with no output"
+        )
+
+        # Handle special tools like `finish`
+        await self._handle_special_tool(name=name, result=result)
+
+        return observation
+    except json.JSONDecodeError:
+        error_msg = f"Error parsing arguments for {name}: Invalid JSON format"
+        logger.error(
+            f"📝 Oops! The arguments for '{name}' don't make sense - invalid JSON, arguments:{command.function.arguments}"
+        )
+        return f"Error: {error_msg}"
+    except Exception as e:
+        error_msg = f"⚠️ Tool '{name}' encountered a problem: {str(e)}"
+        logger.error(error_msg)
+        return f"Error: {error_msg}"
+
+def _get_recovery_suggestions(self, tool_name: str, result: ToolFailure) -> str:
+    """Generate specific suggestions for recovering from tool failures"""
+    # Get the tool's error type to provide specific guidance
+    error_type = getattr(result, 'error_type', None) or "unknown"
+    
+    suggestions = [
+        f"The tool '{tool_name}' encountered an error of type '{error_type}'.",
+        "Consider the following recovery options:",
+    ]
+    
+    # Common recovery options
+    if "timeout" in error_type.lower() or isinstance(result.error, TimeoutError):
+        suggestions.extend([
+            "1. Try again with a simpler request",
+            "2. Break the task into smaller steps",
+            "3. Consider if network conditions might be causing delays"
+        ])
+    elif "notfound" in error_type.lower() or isinstance(result.error, ResourceNotFoundError):
+        suggestions.extend([
+            "1. Verify that the resource exists and check for typos",
+            "2. Try a different search approach or resource location",
+            "3. Consider if the resource might be behind authentication"
+        ])
+    elif "permission" in error_type.lower() or isinstance(result.error, PermissionError):
+        suggestions.extend([
+            "1. Choose a different approach that doesn't require elevated permissions",
+            "2. Look for publicly accessible alternatives",
+            "3. Suggest that the user provide necessary permissions if appropriate"
+        ])
+    elif "invalid" in error_type.lower() or isinstance(result.error, InvalidInputError):
+        suggestions.extend([
+            "1. Review the input format required by the tool",
+            "2. Check for syntax errors or invalid parameters",
+            "3. Try a simpler version of the input"
+        ])
+    elif "rate" in error_type.lower() or isinstance(result.error, RateLimitError):
+        suggestions.extend([
+            "1. Wait a while before trying again",
+            "2. Use a different approach that doesn't rely on the rate-limited service",
+            "3. Break the task into smaller chunks spread over time"
+        ])
+    else:
+        # Generic suggestions
+        suggestions.extend([
+            "1. Try an alternative approach or tool",
+            "2. Simplify your request",
+            "3. Break down the task into smaller steps"
+        ])
+    
+    # Add metadata-specific suggestions if available
+    if hasattr(result, 'metadata') and result.metadata:
+        status_code = result.metadata.get('status_code')
+        if status_code:
+            if 400 <= status_code < 500:
+                suggestions.append(
+                    f"4. The status code {status_code} suggests a client error - check your input parameters"
+                )
+            elif 500 <= status_code < 600:
+                suggestions.append(
+                    f"4. The status code {status_code} suggests a server error - the service might be temporarily unavailable"
+                )
+    
+    return "\n".join(suggestions)
+```
+
+### 5. Tool-Specific Error Handling Improvements
+**File:** `/app/tool/web_search.py` (Example)
+
+Add tool-specific error handling:
+
+```python
+class WebSearch(BaseTool):
+    name: str = "WebSearch"
+    description: str = "Search the web for information using Google Search"
+    
+    # Add retry configuration as an example
+    retry_config = {
+        "max_attempts": 3,
+        "min_wait": 2,  # seconds
+        "max_wait": 15,  # seconds
+        "retryable_errors": [NetworkError, TimeoutError, RateLimitError],
+    }
+    
+    async def execute(self, query: str, num_results: int = 5) -> Any:
+        try:
+            from app.logger import logger
+            
+            # Validate input
+            if not query:
+                raise InvalidInputError("Search query cannot be empty", tool_name=self.name)
+            
+            # Execute search
+            logger.info(f"Searching web for: {query}")
+            
+            try:
+                search_results = await self._perform_search(query, num_results)
+                
+                # Check for empty results
+                if not search_results:
+                    return ToolResult(
+                        output="No search results found. Try refining your query.",
+                        metadata={"query": query, "results_count": 0}
+                    )
+                
+                formatted_results = self._format_results(search_results)
+                return ToolResult(
+                    output=formatted_results,
+                    metadata={
+                        "query": query, 
+                        "results_count": len(search_results)
+                    }
+                )
+                
+            except Exception as e:
+                # Categorize common search errors
+                if "rate limit" in str(e).lower():
+                    raise RateLimitError(
+                        "Search rate limit exceeded", 
+                        tool_name=self.name,
+                        context={"query": query},
+                        retry_after=60
+                    )
+                elif "network" in str(e).lower() or "connection" in str(e).lower():
+                    raise NetworkError(
+                        f"Network error while searching: {str(e)}", 
+                        tool_name=self.name,
+                        context={"query": query}
+                    )
+                elif "timeout" in str(e).lower():
+                    raise TimeoutError(
+                        "Search request timed out", 
+                        tool_name=self.name,
+                        context={"query": query}
+                    )
+                else:
+                    # General execution error
+                    raise ExecutionError(
+                        f"Error executing search: {str(e)}", 
+                        tool_name=self.name,
+                        context={"query": query}
+                    )
+                    
+        except ToolError:
+            # Re-raise specific tool errors for proper handling
+            raise
+        except Exception as e:
+            # Catch-all for unexpected errors
+            raise ExecutionError(
+                f"Unexpected error in web search: {str(e)}", 
+                tool_name=self.name,
+                context={"query": query}
+            )
+```
+
+## Implementation Plan
+
+1. First, implement the enhanced error class hierarchy in `exceptions.py`
+2. Update the `ToolResult` and `ToolFailure` classes in `base.py`
+3. Implement the retry mechanism in `tool_collection.py`
+4. Enhance the ToolCallAgent's error handling
+5. Update individual tools with specific error handling
+6. Add tests to verify error handling and recovery behavior
+
+## Expected Benefits
+
+1. **Better Reliability**: Transient failures will be automatically retried
+2. **Improved User Experience**: More informative error messages and recovery suggestions
+3. **Easier Debugging**: Detailed error context and consistent error structure
+4. **Graceful Degradation**: System can continue operating even when some tools fail
+5. **More Resilient Agents**: Agents can adapt to failures and try alternative approaches
+
+## Testing Strategy
+
+- Add unit tests for each error type and recovery scenario
+- Test retry mechanisms with simulated network failures
+- End-to-end tests with mock tools that fail in different ways
+- Verify that the agent can suggest appropriate recovery steps
+
+## Risks and Mitigations
+
+- **Complexity**: The more sophisticated error handling adds complexity. Mitigated by thorough testing and documentation.
+- **Performance**: Retries could impact performance. Mitigated by configurable retry policies with reasonable defaults.
+- **Token Usage**: More detailed error messages could increase token usage. Mitigated by keeping error messages concise.

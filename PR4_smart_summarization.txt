@@ -1,0 +1,422 @@
+# PR: Intelligent Prompt Reformulation and Content Summarization
+
+This PR improves OpenManus's handling of user prompts and tool-generated content by implementing LLM-powered reformulation and summarization capabilities. These changes enhance usability by ensuring prompts are optimally structured and large content (like web pages) is intelligently summarized rather than simply truncated.
+
+## Problem Statement
+
+The current implementation has several limitations:
+1. User prompts are passed directly to agents without reformulation or enhancement
+2. Web content and large tool outputs are truncated rather than meaningfully summarized
+3. No contextual summarization that considers the original user request
+4. Lack of specialized handling for different content types (web pages, code, search results)
+
+## Proposed Changes
+
+### 1. Add Prompt Reformulation Service
+**File:** `/app/service/prompt_service.py` (new)
+
+Create a service to enhance, restructure, and clarify user prompts:
+
+```python
+from typing import Dict, List, Optional
+
+from app.llm import LLM
+from app.schema import Message
+
+
+class PromptService:
+    """Service for enhancing and reformulating user prompts"""
+
+    def __init__(self, llm: Optional[LLM] = None):
+        self.llm = llm or LLM()
+
+    async def enhance_prompt(self, original_prompt: str) -> str:
+        """
+        Transform a user prompt into a more structured, clear version
+        that's optimized for agent execution.
+        """
+        system_message = """You are an expert at reformulating user requests into clear, 
+        structured prompts. Your job is to take the user's original prompt and enhance it 
+        by making it more specific, actionable, and well-structured, without changing the 
+        intent or adding new requirements. Focus on:
+        1. Clarifying ambiguous aspects
+        2. Structuring the prompt in a logical order
+        3. Breaking down complex tasks into steps
+        4. Ensuring all necessary details are preserved
+        Do NOT add new requirements or substantively change the user's intent.
+        Return ONLY the reformulated prompt with no explanations or metadata."""
+
+        messages = [
+            Message.system_message(system_message),
+            Message.user_message(f"Original prompt: {original_prompt}\n\nEnhanced prompt:"),
+        ]
+
+        try:
+            enhanced_prompt = await self.llm.ask(messages=messages)
+            return enhanced_prompt
+        except Exception as e:
+            # Fall back to original prompt on any error
+            return original_prompt
+            
+    async def create_task_breakdown(self, prompt: str) -> List[str]:
+        """Break down a complex task into a list of subtasks"""
+        system_message = """Analyze the user's request and break it down into a 
+        sequence of clear, logical subtasks that would be needed to complete it.
+        Return a list of subtasks as a numbered list, with each task being specific 
+        and actionable. Do not add requirements beyond what's in the original request."""
+        
+        messages = [
+            Message.system_message(system_message),
+            Message.user_message(f"Request: {prompt}\n\nBreak this down into subtasks:"),
+        ]
+        
+        try:
+            response = await self.llm.ask(messages=messages)
+            # Parse the numbered list into individual tasks
+            subtasks = []
+            for line in response.strip().split('\n'):
+                line = line.strip()
+                if line and (line[0].isdigit() or line.startswith('- ')):
+                    # Remove numbering or bullet points
+                    task = line.split('.', 1)[-1].strip() if '.' in line else line[2:].strip()
+                    subtasks.append(task)
+            
+            return subtasks if subtasks else [prompt]  # Fallback to original if parsing fails
+        except Exception:
+            return [prompt]  # Fallback to original prompt on error
+```
+
+### 2. Create Content Summarization Service 
+**File:** `/app/service/summarization_service.py` (new)
+
+Add a specialized service for intelligent content summarization:
+
+```python
+from enum import Enum
+from typing import Any, Dict, Optional
+
+from app.llm import LLM
+from app.schema import Message
+
+
+class ContentType(str, Enum):
+    """Types of content that can be summarized"""
+    WEB_PAGE = "web_page"
+    SEARCH_RESULTS = "search_results"
+    CODE = "code"
+    TEXT = "text"
+    API_RESPONSE = "api_response"
+
+
+class SummarizationService:
+    """Service for intelligently summarizing different types of content"""
+
+    def __init__(self, llm: Optional[LLM] = None):
+        self.llm = llm or LLM()
+        self._summarization_prompts = {
+            ContentType.WEB_PAGE: """Summarize this web page content in a comprehensive way that captures:
+            1. The main topic and purpose of the page
+            2. Key information and data points
+            3. Any important instructions or steps
+            4. Relevant quotes or statements
+            Focus on extracting the most valuable information that would help address the user's query.
+            Format the summary in a clear, structured way with headings if appropriate.""",
+            
+            ContentType.SEARCH_RESULTS: """Extract and organize the key information from these search results. For each relevant result:
+            1. Highlight the main point
+            2. Note the source credibility
+            3. Extract any specific data or facts
+            Focus on information that directly relates to the original query.""",
+            
+            ContentType.CODE: """Analyze this code and provide a concise summary that includes:
+            1. The purpose of the code
+            2. Key functions and their roles
+            3. The overall architecture
+            4. Any notable patterns or techniques used
+            Focus on giving a high-level understanding rather than line-by-line explanation.""",
+            
+            ContentType.TEXT: """Summarize this text content, maintaining the core message and key points
+            while reducing length. Preserve important details, examples, and any actionable information.""",
+            
+            ContentType.API_RESPONSE: """Extract the key information from this API response, focusing on:
+            1. The status and success/failure indicators
+            2. Important data points and values
+            3. Any error messages or warnings
+            4. Relationships between different data elements
+            Format the information in a clear, structured way."""
+        }
+
+    async def summarize_content(
+        self, 
+        content: str, 
+        content_type: ContentType, 
+        max_length: int = 1000,
+        original_query: Optional[str] = None
+    ) -> str:
+        """
+        Intelligently summarize content based on its type and the original query.
+        
+        Args:
+            content: The content to summarize
+            content_type: Type of content for specialized summarization
+            max_length: Target maximum length for the summary
+            original_query: The original user query for context
+        
+        Returns:
+            Summarized content
+        """
+        if not content:
+            return ""
+            
+        # If content is already shorter than target length, just return it
+        if len(content) <= max_length:
+            return content
+            
+        # Build the prompt
+        system_prompt = "You are an expert at extracting and summarizing information."
+        
+        # Get type-specific instructions
+        type_instructions = self._summarization_prompts.get(
+            content_type, self._summarization_prompts[ContentType.TEXT]
+        )
+        
+        # Add context from original query if provided
+        context_prompt = ""
+        if original_query:
+            context_prompt = f"\n\nThis content is being summarized in response to the user query: '{original_query}'. Focus on information most relevant to this query."
+        
+        # Build the final prompt
+        user_prompt = f"{type_instructions}{context_prompt}\n\nContent to summarize:\n{content}\n\nPlease provide a comprehensive summary:"
+        
+        messages = [
+            Message.system_message(system_prompt),
+            Message.user_message(user_prompt)
+        ]
+        
+        try:
+            summary = await self.llm.ask(messages=messages)
+            return summary
+        except Exception as e:
+            # Fallback to simple truncation if summarization fails
+            return content[:max_length] + "... [Content truncated]"
+            
+    async def extract_key_info(
+        self, 
+        content: str, 
+        info_type: str,
+        query: Optional[str] = None
+    ) -> Dict[str, Any]:
+        """
+        Extract specific structured information from content.
+        
+        Args:
+            content: Content to analyze
+            info_type: Type of information to extract (e.g., "product_details", "contact_info")
+            query: The query providing context
+            
+        Returns:
+            Dictionary of extracted information
+        """
+        # Implementation for specific information extraction
+        # This would use LLM to parse content into structured data
+        pass
+```
+
+### 3. Enhance Browser Tool to Use Summarization
+**File:** `/app/tool/browser_use_tool.py`
+
+Replace simple truncation with intelligent summarization:
+
+```python
+from app.service.summarization_service import ContentType, SummarizationService
+
+# Add to the class initialization
+def __init__(self, *args, **kwargs):
+    super().__init__(*args, **kwargs)
+    self.summarization_service = SummarizationService()
+    self.original_query = None  # Will be set with context when available
+    
+# Update the "get_html" action handler
+elif action == "get_html":
+    html = await context.get_page_html()
+    if len(html) > MAX_LENGTH:
+        # Get page title for better context
+        title = await context.execute_javascript("document.title")
+        
+        # Use intelligent summarization instead of simple truncation
+        summary = await self.summarization_service.summarize_content(
+            content=html,
+            content_type=ContentType.WEB_PAGE,
+            original_query=self.original_query,
+            max_length=MAX_LENGTH
+        )
+        return ToolResult(
+            output=f"HTML content from page '{title}' (summarized):\n\n{summary}"
+        )
+    return ToolResult(output=html)
+
+# Update the "get_text" action handler
+elif action == "get_text":
+    text = await context.execute_javascript("document.body.innerText")
+    if len(text) > MAX_LENGTH:
+        # Summarize text content
+        summary = await self.summarization_service.summarize_content(
+            content=text,
+            content_type=ContentType.TEXT,
+            original_query=self.original_query,
+            max_length=MAX_LENGTH
+        )
+        return ToolResult(
+            output=f"Page text content (summarized):\n\n{summary}"
+        )
+    return ToolResult(output=text)
+```
+
+### 4. Update Agent to Support Context Propagation
+**File:** `/app/agent/toolcall.py`
+
+Modify the ToolCallAgent to pass context to tools:
+
+```python
+# Add to imports
+from app.service.prompt_service import PromptService
+
+# Add to class initialization
+def __init__(self, *args, **kwargs):
+    super().__init__(*args, **kwargs)
+    self.prompt_service = PromptService()
+    self.original_prompt = None
+
+# Update the run method to enhance prompts
+async def run(self, request: Optional[str] = None) -> str:
+    """Execute the agent's main loop with enhanced prompts."""
+    if self.state != AgentState.IDLE:
+        raise RuntimeError(f"Cannot run agent from state: {self.state}")
+
+    if request:
+        # Store original prompt for context
+        self.original_prompt = request
+        
+        # Enhance the prompt for better structure and clarity
+        enhanced_prompt = await self.prompt_service.enhance_prompt(request)
+        
+        # Use the enhanced prompt 
+        self.update_memory("user", enhanced_prompt)
+        
+        # Propagate original query to tools that support context
+        for tool in self.available_tools:
+            if hasattr(tool, 'original_query'):
+                tool.original_query = request
+    
+    # Rest of the method remains the same...
+
+# Update execute_tool method to handle large results
+async def execute_tool(self, command: ToolCall) -> str:
+    # Existing code...
+    
+    # After executing the tool and before truncating with max_observe
+    if result and self.max_observe and len(str(result)) > self.max_observe:
+        # If result is very large, summarize rather than truncate
+        try:
+            from app.service.summarization_service import ContentType, SummarizationService
+            
+            summarizer = SummarizationService()
+            
+            # Determine content type based on tool name
+            content_type = ContentType.TEXT  # Default
+            if command.function.name.lower() in ["websearch", "search"]:
+                content_type = ContentType.SEARCH_RESULTS
+            elif command.function.name.lower() in ["get_html", "get_text"]:
+                content_type = ContentType.WEB_PAGE
+            elif command.function.name.lower() in ["execute", "execute_js", "python_execute"]:
+                content_type = ContentType.CODE
+                
+            # Summarize with context from original prompt
+            summarized_result = await summarizer.summarize_content(
+                content=str(result),
+                content_type=content_type,
+                original_query=self.original_prompt,
+                max_length=self.max_observe
+            )
+            
+            # Format the observation with summarization note
+            observation = (
+                f"Observed output of cmd `{name}` (summarized):\n{summarized_result}"
+            )
+            return observation
+            
+        except Exception:
+            # Fall back to truncation if summarization fails
+            result = str(result)[:self.max_observe] + "... [Content truncated]"
+            
+    # Format result for display as before...
+```
+
+### 5. Add Search Result Summarization to Web Search Tool
+**File:** `/app/tool/web_search.py`
+
+Enhance the web search tool with better result summarization:
+
+```python
+from app.service.summarization_service import ContentType, SummarizationService
+
+class WebSearch(BaseTool):
+    # Existing code...
+    
+    async def execute(self, query: str, num_results: int = 5) -> Any:
+        # Execute search and get raw results...
+        
+        # Get raw search results
+        search_results = await self._perform_search(query, num_results)
+        
+        if not search_results:
+            return "No search results found."
+            
+        # Format raw results to a standard string format
+        raw_formatted = self._format_results(search_results)
+        
+        # Use the summarization service to create a better summary
+        try:
+            summarizer = SummarizationService()
+            summarized_results = await summarizer.summarize_content(
+                content=raw_formatted,
+                content_type=ContentType.SEARCH_RESULTS,
+                original_query=query
+            )
+            
+            return f"Search results for '{query}':\n\n{summarized_results}"
+        except Exception:
+            # Fallback to standard formatting
+            return raw_formatted
+```
+
+## Implementation Plan
+
+1. First, create the summarization service to provide the core functionality
+2. Next, create the prompt reformation service
+3. Update the browser tool to use summarization instead of truncation
+4. Modify the agent to use prompt enhancement and propagate context
+5. Update the search tool to use enhanced result summarization
+6. Add unit tests for each new component
+
+## Expected Benefits
+
+1. **Clearer Task Specifications**: Enhanced prompts make agent execution more precise
+2. **Better Information Extraction**: Intelligently summarized content preserves key information
+3. **Improved Context Preservation**: Original query context helps focus summaries on relevant information
+4. **More Readable Outputs**: Structured summarizations instead of arbitrary truncation
+5. **Content-Specific Handling**: Different approaches for web pages, code, search results, etc.
+
+## Testing Strategy
+
+- Unit tests for each summarization and prompt enhancement function
+- Comparison tests between truncated and summarized outputs 
+- End-to-end tests with sample complex queries and web pages
+- Performance testing to ensure summarization doesn't add excessive latency
+
+## Future Improvements
+
+- Add support for document summarization with more structure (e.g., extracting specific sections)
+- Implement cache layer for summarization results to improve performance
+- Create content type detection for automatic content formatting
+- Add ability to generate follow-up questions based on content summaries
