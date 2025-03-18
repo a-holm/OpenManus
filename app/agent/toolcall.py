@@ -69,11 +69,12 @@ class ToolCallAgent(ReActAgent):
             raise
 
         self.tool_calls = response.tool_calls
+        number_of_tools = len(response.tool_calls) if response.tool_calls else 0
 
         # Log response info
         logger.info(f"✨ {self.name}'s thoughts: {response.content}")
         logger.info(
-            f"🛠️ {self.name} selected {len(response.tool_calls) if response.tool_calls else 0} tools to use"
+            f"🛠️ {self.name} selected {number_of_tools} tools to use"
         )
         if response.tool_calls:
             logger.info(
