@@ -15,11 +15,11 @@ async def process_prompt(agent, prompt):
     try:
         logger.warning(f"Processing prompt: {prompt[:50]}{'...' if len(prompt) > 50 else ''}")
         # Add a timeout to prevent hanging (e.g., 10 minutes)
-        await asyncio.wait_for(agent.run(prompt), timeout=600)
+        await asyncio.wait_for(agent.run(prompt), timeout=3600)
         logger.info("Request processing completed successfully.")
         return True
     except asyncio.TimeoutError:
-        logger.error("Processing prompt timed out after 10 minutes.")
+        logger.error("Processing prompt timed out after 1 hour.")
         return False
     except Exception as e:
         logger.error(f"Error processing prompt: {str(e)}")
