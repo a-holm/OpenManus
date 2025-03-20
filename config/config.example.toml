@@ -10,6 +10,14 @@ rpm_limit = 50                            # Optional: Maximum requests per minut
 itpm_limit = 20000                      # Optional: Maximum input tokens per minute (e.g., 20k ITPM)
 otpm_limit = 8000                      # Optional: Maximum output tokens per minute (e.g., 8k OTPM)
 
+# [llm] # Amazon Bedrock
+# api_type = "aws"                                       # Required
+# model = "us.anthropic.claude-3-7-sonnet-20250219-v1:0" # Bedrock supported modelID
+# base_url = "bedrock-runtime.us-west-2.amazonaws.com"   # Not used now
+# max_tokens = 8192
+# temperature = 1.0
+# api_key = "bear"                                       # Required but not used for Bedrock
+
 # [llm] #AZURE OPENAI:
 # api_type= 'azure'
 # model = "YOUR_MODEL_NAME" #"gpt-4o-mini"
