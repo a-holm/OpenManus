@@ -29,7 +29,6 @@ from app.schema import (
     ToolChoice,
 )
 
-
 REASONING_MODELS = ["o1", "o3-mini"]
 MULTIMODAL_MODELS = [
     "gpt-4-vision-preview",
@@ -342,7 +341,10 @@ class LLM:
                     # Just remove the base64_image field and keep the text content
                     del message["base64_image"]
 
-                if "content" in message or "tool_calls" in message:
+                if "tool_calls" in message:
+                    formatted_messages.append(message)
+                elif "content" in message and message["content"].strip():
+                    # If content exists and contains non-empty text.
                     formatted_messages.append(message)
                 # else: do not include the message
             else:
@@ -541,9 +543,7 @@ class LLM:
             multimodal_content = (
                 [{"type": "text", "text": content}]
                 if isinstance(content, str)
-                else content
-                if isinstance(content, list)
-                else []
+                else content if isinstance(content, list) else []
             )
 
             # Add images to content
