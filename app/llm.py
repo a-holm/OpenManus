@@ -33,6 +33,7 @@ from app.schema import (
     ToolChoice,
 )
 
+
 REASONING_MODELS = ["o1", "o3-mini"]
 MULTIMODAL_MODELS = [
     "gpt-4-vision-preview",
@@ -227,12 +228,12 @@ class LLM:
         # Trackers for token-based rate limits.
         self.requests_tracker: Deque[float] = deque()  # Requests last minute.
         self.token_tracker: Deque[Tuple[float, int]] = deque()  # General tracker.
-        self.input_token_tracker: Deque[Tuple[float, int]] = (
-            deque()
-        )  # Input tokens per minute.
-        self.output_token_tracker: Deque[Tuple[float, int]] = (
-            deque()
-        )  # Output tokens per minute.
+        self.input_token_tracker: Deque[
+            Tuple[float, int]
+        ] = deque()  # Input tokens per minute.
+        self.output_token_tracker: Deque[
+            Tuple[float, int]
+        ] = deque()  # Output tokens per minute.
 
         # Lock for updating trackers.
         self._tracker_lock = asyncio.Lock()
@@ -705,7 +706,9 @@ class LLM:
             multimodal_content: list[dict] = (
                 [{"type": "text", "text": content}]
                 if isinstance(content, str)
-                else content if isinstance(content, list) else []
+                else content
+                if isinstance(content, list)
+                else []
             )
 
             # Add images to content
