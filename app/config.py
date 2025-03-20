@@ -27,6 +27,22 @@ class LLMSettings(BaseModel):
     temperature: float = Field(1.0, description="Sampling temperature")
     api_type: str = Field(..., description="Azure, Openai, or Ollama")
     api_version: str = Field(..., description="Azure Openai version if AzureOpenai")
+    rpm_limit: Optional[int] = Field(
+        None,
+        description="Maximum requests per minute (None for unlimited)",
+    )
+    tpm_limit: Optional[int] = Field(
+        None,
+        description="Maximum tokens per minute (None for unlimited)",
+    )
+    itpm_limit: Optional[int] = Field(
+        None,
+        description="Maximum input tokens per minute (None for unlimited)",
+    )
+    otpm_limit: Optional[int] = Field(
+        None,
+        description="Maximum output tokens per minute (None for unlimited)",
+    )
 
 
 class ProxySettings(BaseModel):
@@ -146,6 +162,10 @@ class Config:
             "temperature": base_llm.get("temperature", 1.0),
             "api_type": base_llm.get("api_type", ""),
             "api_version": base_llm.get("api_version", ""),
+            "rpm_limit": base_llm.get("rpm_limit"),
+            "tpm_limit": base_llm.get("tpm_limit"),
+            "itpm_limit": base_llm.get("itpm_limit"),
+            "otpm_limit": base_llm.get("otpm_limit"),
         }
 
         # handle browser config.

@@ -1,5 +1,8 @@
+import asyncio
 import math
-from typing import Dict, List, Optional, Union
+import time
+from collections import deque
+from typing import Deque, Tuple, Union
 
 import tiktoken
 from openai import (
@@ -29,7 +32,6 @@ from app.schema import (
     ToolChoice,
 )
 
-
 REASONING_MODELS = ["o1", "o3-mini"]
 MULTIMODAL_MODELS = [
     "gpt-4-vision-preview",
@@ -43,17 +45,17 @@ MULTIMODAL_MODELS = [
 
 class TokenCounter:
     # Token constants
-    BASE_MESSAGE_TOKENS = 4
-    FORMAT_TOKENS = 2
-    LOW_DETAIL_IMAGE_TOKENS = 85
-    HIGH_DETAIL_TILE_TOKENS = 170
+    BASE_MESSAGE_TOKENS: int = 4
+    FORMAT_TOKENS: int = 2
+    LOW_DETAIL_IMAGE_TOKENS: int = 85
+    HIGH_DETAIL_TILE_TOKENS: int = 170
 
     # Image processing constants
-    MAX_SIZE = 2048
-    HIGH_DETAIL_TARGET_SHORT_SIDE = 768
-    TILE_SIZE = 512
+    MAX_SIZE: int = 2048
+    HIGH_DETAIL_TARGET_SHORT_SIDE: int = 768
+    TILE_SIZE: int = 512
 
-    def __init__(self, tokenizer):
+    def __init__(self, tokenizer: tiktoken.Encoding) -> None:
         self.tokenizer = tokenizer
 
     def count_text(self, text: str) -> int:
@@ -121,7 +123,7 @@ class TokenCounter:
             total_tiles * self.HIGH_DETAIL_TILE_TOKENS
         ) + self.LOW_DETAIL_IMAGE_TOKENS
 
-    def count_content(self, content: Union[str, List[Union[str, dict]]]) -> int:
+    def count_content(self, content: Union[str, list[Union[str, dict]]]) -> int:
         """Calculate tokens for message content"""
         if not content:
             return 0
@@ -140,7 +142,7 @@ class TokenCounter:
                     token_count += self.count_image(item)
         return token_count
 
-    def count_tool_calls(self, tool_calls: List[dict]) -> int:
+    def count_tool_calls(self, tool_calls: list[dict]) -> int:
         """Calculate tokens for tool calls"""
         token_count = 0
         for tool_call in tool_calls:
@@ -150,7 +152,7 @@ class TokenCounter:
                 token_count += self.count_text(function.get("arguments", ""))
         return token_count
 
-    def count_message_tokens(self, messages: List[dict]) -> int:
+    def count_message_tokens(self, messages: list[dict]) -> int:
         """Calculate the total number of tokens in a message list"""
         total_tokens = self.FORMAT_TOKENS  # Base format tokens
 
@@ -178,11 +180,11 @@ class TokenCounter:
 
 
 class LLM:
-    _instances: Dict[str, "LLM"] = {}
+    _instances: dict[str, "LLM"] = {}
 
     def __new__(
-        cls, config_name: str = "default", llm_config: Optional[LLMSettings] = None
-    ):
+        cls, config_name: str = "default", llm_config: LLMSettings | None = None
+    ) -> "LLM":
         if config_name not in cls._instances:
             instance = super().__new__(cls)
             instance.__init__(config_name, llm_config)
@@ -190,87 +192,192 @@ class LLM:
         return cls._instances[config_name]
 
     def __init__(
-        self, config_name: str = "default", llm_config: Optional[LLMSettings] = None
-    ):
-        if not hasattr(self, "client"):  # Only initialize if not already initialized
-            llm_config = llm_config or config.llm
-            llm_config = llm_config.get(config_name, llm_config["default"])
-            self.model = llm_config.model
-            self.max_tokens = llm_config.max_tokens
-            self.temperature = llm_config.temperature
-            self.api_type = llm_config.api_type
-            self.api_key = llm_config.api_key
-            self.api_version = llm_config.api_version
-            self.base_url = llm_config.base_url
+        self, config_name: str = "default", llm_config: LLMSettings | None = None
+    ) -> None:
+        # Initialize only once per instance.
+        if hasattr(self, "client"):
+            return
 
-            # Add token counting related attributes
-            self.total_input_tokens = 0
-            self.total_completion_tokens = 0
-            self.max_input_tokens = (
-                llm_config.max_input_tokens
-                if hasattr(llm_config, "max_input_tokens")
-                else None
-            )
+        llm_config = llm_config or config.llm
+        llm_config = llm_config.get(config_name, llm_config["default"])
+        self.model: str = llm_config.model
+        self.max_tokens: int = llm_config.max_tokens
+        self.temperature: float = llm_config.temperature
+        self.api_type: str = llm_config.api_type
+        self.api_key: str = llm_config.api_key
+        self.api_version: str = llm_config.api_version
+        self.base_url: str = llm_config.base_url
 
-            # Initialize tokenizer
-            try:
-                self.tokenizer = tiktoken.encoding_for_model(self.model)
-            except KeyError:
-                # If the model is not in tiktoken's presets, use cl100k_base as default
-                self.tokenizer = tiktoken.get_encoding("cl100k_base")
-
-            if self.api_type == "azure":
-                self.client = AsyncAzureOpenAI(
-                    base_url=self.base_url,
-                    api_key=self.api_key,
-                    api_version=self.api_version,
-                )
-            else:
-                self.client = AsyncOpenAI(api_key=self.api_key, base_url=self.base_url)
-
-            self.token_counter = TokenCounter(self.tokenizer)
-
-    def count_tokens(self, text: str) -> int:
-        """Calculate the number of tokens in a text"""
-        if not text:
-            return 0
-        return len(self.tokenizer.encode(text))
-
-    def count_message_tokens(self, messages: List[dict]) -> int:
-        return self.token_counter.count_message_tokens(messages)
-
-    def update_token_count(self, input_tokens: int, completion_tokens: int = 0) -> None:
-        """Update token counts"""
-        # Only track tokens if max_input_tokens is set
-        self.total_input_tokens += input_tokens
-        self.total_completion_tokens += completion_tokens
-        logger.info(
-            f"Token usage: Input={input_tokens}, Completion={completion_tokens}, "
-            f"Cumulative Input={self.total_input_tokens}, Cumulative Completion={self.total_completion_tokens}, "
-            f"Total={input_tokens + completion_tokens}, Cumulative Total={self.total_input_tokens + self.total_completion_tokens}"
+        # Token tracking attributes.
+        self.total_input_tokens: int = 0
+        self.total_output_tokens: int = 0
+        self.max_input_tokens: int | None = getattr(
+            llm_config, "max_input_tokens", None
         )
 
-    def check_token_limit(self, input_tokens: int) -> bool:
-        """Check if token limits are exceeded"""
-        if self.max_input_tokens is not None:
-            return (self.total_input_tokens + input_tokens) <= self.max_input_tokens
-        # If max_input_tokens is not set, always return True
-        return True
+        # Rate limiting per-minute limits.
+        self.rpm_limit: int | None = getattr(llm_config, "rpm_limit", None)
+        self.tpm_limit: int | None = getattr(llm_config, "tpm_limit", None)
+        self.itpm_limit: int | None = getattr(llm_config, "itpm_limit", None)
+        self.otpm_limit: int | None = getattr(llm_config, "otpm_limit", None)
+        self.min_interval: float = 60 / self.rpm_limit if self.rpm_limit else 0
+        self.last_request_time: float | None = None
 
-    def get_limit_error_message(self, input_tokens: int) -> str:
-        """Generate error message for token limit exceeded"""
-        if (
-            self.max_input_tokens is not None
-            and (self.total_input_tokens + input_tokens) > self.max_input_tokens
-        ):
-            return f"Request may exceed input token limit (Current: {self.total_input_tokens}, Needed: {input_tokens}, Max: {self.max_input_tokens})"
+        # Trackers for token-based rate limits.
+        self.requests_tracker: Deque[float] = deque()  # Requests last minute.
+        self.token_tracker: Deque[Tuple[float, int]] = deque()  # General tracker.
+        self.input_token_tracker: Deque[Tuple[float, int]] = (
+            deque()
+        )  # Input tokens per minute.
+        self.output_token_tracker: Deque[Tuple[float, int]] = (
+            deque()
+        )  # Output tokens per minute.
 
-        return "Token limit exceeded"
+        # Lock for updating trackers.
+        self._tracker_lock = asyncio.Lock()
+
+        # Initialize the tokenizer.
+        try:
+            self.tokenizer = tiktoken.encoding_for_model(self.model)
+        except KeyError:
+            self.tokenizer = tiktoken.get_encoding("cl100k_base")
+
+        if self.api_type == "azure":
+            self.client = AsyncAzureOpenAI(
+                base_url=self.base_url,
+                api_key=self.api_key,
+                api_version=self.api_version,
+            )
+        else:
+            self.client = AsyncOpenAI(api_key=self.api_key, base_url=self.base_url)
+
+        self.token_counter = TokenCounter(self.tokenizer)
+
+        # Cap max_tokens if it exceeds the output tokens-per-minute limit.
+        if self.otpm_limit is not None and self.max_tokens > self.otpm_limit:
+            logger.warning(
+                f"max_tokens ({self.max_tokens}) exceeds output tokens per minute limit ({self.otpm_limit}). "
+                f"Capping max_tokens to {self.otpm_limit}."
+            )
+            self.max_tokens = self.otpm_limit
+
+    def count_tokens(self, text: str) -> int:
+        """Return the number of tokens in a given text."""
+        return 0 if not text else len(self.tokenizer.encode(text))
+
+    def count_message_tokens(self, messages: list[dict]) -> int:
+        return self.token_counter.count_message_tokens(messages)
+
+    async def update_token_count(
+        self, input_tokens: int, output_tokens: int = 0
+    ) -> None:
+        """
+        Update the cumulative token counts and token trackers.
+
+        Args:
+            input_tokens (int): The number of input tokens used for the request.
+            output_tokens (int, optional): The number of output tokens produced. Defaults to 0.
+        """
+        self.total_input_tokens += input_tokens
+        self.total_output_tokens += output_tokens
+        now = time.time()
+
+        async with self._tracker_lock:
+            # Update token trackers
+            if input_tokens > 0:
+                self.input_token_tracker.append((now, input_tokens))
+                self.token_tracker.append((now, input_tokens))
+            if output_tokens > 0:
+                self.output_token_tracker.append((now, output_tokens))
+                self.token_tracker.append((now, output_tokens))
+
+            # Clean up expired token records
+            while self.token_tracker and now - self.token_tracker[0][0] >= 60:
+                self.token_tracker.popleft()
+            while (
+                self.input_token_tracker and now - self.input_token_tracker[0][0] >= 60
+            ):
+                self.input_token_tracker.popleft()
+            while (
+                self.output_token_tracker
+                and now - self.output_token_tracker[0][0] >= 60
+            ):
+                self.output_token_tracker.popleft()
+
+            # Clean up expired request records too for accurate count
+            while self.requests_tracker and now - self.requests_tracker[0] >= 60:
+                self.requests_tracker.popleft()
+
+            # Just use the length of the tracker for RPM
+            current_rpm = len(self.requests_tracker)
+
+        logger.info(
+            f"Token usage: Input={input_tokens}, Output={output_tokens}, "
+            f"Cumulative Input={self.total_input_tokens}, Cumulative Output={self.total_output_tokens}, "
+            f"Total for request={input_tokens + output_tokens}, "
+            f"Cumulative Total={self.total_input_tokens + self.total_output_tokens}, "
+            f"RPM (requests per minute)={current_rpm}"
+        )
+
+    async def wait_for_token_availability(
+        self, planned_tokens: int, tracker: Deque[Tuple[float, int]], limit: int
+    ) -> None:
+        """
+        Wait until adding planned_tokens to the given tracker will not exceed the limit.
+
+        This method holds the _tracker_lock for the entire check-and-wait loop. It removes
+        any expired token records (older than 60 seconds) and then checks if the sum of the
+        tracked tokens plus planned_tokens is within the limit. If it is, it reserves the
+        tokens (by appending a new record) and returns.
+
+        Otherwise, it calculates how long to sleep until at least the earliest token record expires,
+        logs that wait time, and then awaits the sleep while still holding the lock.
+        """
+        while True:
+            async with self._tracker_lock:
+                now = time.time()
+                # Remove expired records older than 60 seconds.
+                while tracker and now - tracker[0][0] > 60:
+                    tracker.popleft()
+                current_total = sum(tokens for (_, tokens) in tracker)
+                if planned_tokens <= limit - current_total:
+                    # Reserve the tokens and return.
+                    tracker.append((now, planned_tokens))
+                    return
+                # Calculate the wait time until the oldest token record expires.
+                sleep_time = 60 - (now - tracker[0][0]) if tracker else 0.1
+                logger.info(
+                    f"Waiting for token availability: planned_tokens={planned_tokens}, "
+                    f"current_total={current_total}, limit={limit}. Sleeping for {sleep_time:.2f} seconds"
+                )
+                await asyncio.sleep(sleep_time)
+
+    def truncate_messages(self, messages: list[dict]) -> list[dict]:
+        """
+        If the token count of messages greatly exceeds the itpm_limit,
+        log a warning and trim older messages until the count fits.
+
+        This naive approach simply drops the earliest messages one by one.
+        """
+        current_tokens = self.count_message_tokens(messages)
+        if self.itpm_limit is not None and current_tokens > self.itpm_limit:
+            logger.warning(
+                f"Input messages token count ({current_tokens}) exceeds the input tokens per minute "
+                f"limit ({self.itpm_limit}). Truncating older messages."
+            )
+            new_messages = messages.copy()
+            while (
+                new_messages
+                and self.count_message_tokens(new_messages) > self.itpm_limit
+            ):
+                new_messages.pop(0)
+            return new_messages
+        return messages
 
     @staticmethod
     def format_messages(
-        messages: List[Union[dict, Message]], supports_images: bool = False
-    ) -> List[dict]:
+        messages: list[dict | Message], supports_images: bool = False
+    ) -> list[dict]:
         """
         Format messages for LLM by converting them to OpenAI message format.
 
@@ -279,7 +386,7 @@ class LLM:
             supports_images: Flag indicating if the target model supports image inputs
 
         Returns:
-            List[dict]: List of formatted messages in OpenAI format
+            list[dict]: List of formatted messages in OpenAI format
 
         Raises:
             ValueError: If messages are invalid or missing required fields
@@ -293,7 +400,7 @@ class LLM:
             ... ]
             >>> formatted = LLM.format_messages(msgs)
         """
-        formatted_messages = []
+        formatted_messages: list[dict] = []
 
         for message in messages:
             # Convert Message objects to dictionaries
@@ -342,7 +449,10 @@ class LLM:
                     # Just remove the base64_image field and keep the text content
                     del message["base64_image"]
 
-                if "content" in message or "tool_calls" in message:
+                if "tool_calls" in message:
+                    formatted_messages.append(message)
+                elif "content" in message and message["content"].strip():
+                    # Make sure content exist and has non-empty text
                     formatted_messages.append(message)
                 # else: do not include the message
             else:
@@ -355,6 +465,51 @@ class LLM:
 
         return formatted_messages
 
+    async def wait_for_request_rate(self) -> None:
+        """
+        Wait until the number of requests in the past 60 seconds
+        is below the allowed RPM limit.
+        """
+        if not self.rpm_limit:  # Skip if no limit is set
+            return
+
+        while True:
+            async with self._tracker_lock:
+                now = time.time()
+                # Remove any expired requests (older than 60 seconds)
+                while self.requests_tracker and now - self.requests_tracker[0] >= 60:
+                    self.requests_tracker.popleft()
+
+                current_rpm = len(self.requests_tracker)
+                logger.info(
+                    f"Current RPM before check: {current_rpm}, Limit: {self.rpm_limit}"
+                )
+
+                # If adding a new request would not exceed the limit, update the tracker and return
+                if current_rpm < self.rpm_limit:
+                    self.requests_tracker.append(now)
+                    self.last_request_time = now
+                    logger.info(
+                        f"Request allowed. New RPM: {len(self.requests_tracker)}"
+                    )
+                    return
+
+                # Otherwise, calculate the time until the oldest request expires
+                if self.requests_tracker:
+                    sleep_time = (
+                        60 - (now - self.requests_tracker[0]) + 0.1
+                    )  # Add a small buffer
+                else:
+                    sleep_time = 0.1  # Should never happen but just in case
+
+                logger.info(
+                    f"Enforcing request rate limit: current RPM={current_rpm}, "
+                    f"limit={self.rpm_limit}, sleeping {sleep_time:.2f} seconds"
+                )
+
+            # Release the lock during sleep to allow other operations
+            await asyncio.sleep(sleep_time)
+
     @retry(
         wait=wait_random_exponential(min=1, max=60),
         stop=stop_after_attempt(6),
@@ -364,10 +519,10 @@ class LLM:
     )
     async def ask(
         self,
-        messages: List[Union[dict, Message]],
-        system_msgs: Optional[List[Union[dict, Message]]] = None,
+        messages: list[dict | Message],
+        system_msgs: list[dict | Message] | None = None,
         stream: bool = True,
-        temperature: Optional[float] = None,
+        temperature: float | None = None,
     ) -> str:
         """
         Send a prompt to the LLM and get the response.
@@ -398,22 +553,35 @@ class LLM:
             else:
                 messages = self.format_messages(messages, supports_images)
 
-            # Calculate input token count
+            # Check if input tokens exceed the per-minute limit and truncate if needed.
             input_tokens = self.count_message_tokens(messages)
+            if self.itpm_limit is not None and input_tokens > self.itpm_limit:
+                messages = self.truncate_messages(messages)
+                input_tokens = self.count_message_tokens(messages)
 
-            # Check if token limits are exceeded
-            if not self.check_token_limit(input_tokens):
-                error_message = self.get_limit_error_message(input_tokens)
-                # Raise a special exception that won't be retried
-                raise TokenLimitExceeded(error_message)
+            # Wait until there is room under the input tokens per minute limit.
+            if self.itpm_limit is not None:
+                await self.wait_for_token_availability(
+                    input_tokens, self.input_token_tracker, self.itpm_limit
+                )
 
-            params = {
+            # For output tokens (planned maximum), wait if needed.
+            if self.otpm_limit is not None:
+                await self.wait_for_token_availability(
+                    self.max_tokens, self.output_token_tracker, self.otpm_limit
+                )
+
+            # Enforce request-level rate limiting.
+            await self.wait_for_request_rate()
+            self.last_request_time = time.time()
+
+            params: dict = {
                 "model": self.model,
                 "messages": messages,
             }
 
             if self.model in REASONING_MODELS:
-                params["max_completion_tokens"] = self.max_tokens
+                params["max_output_tokens"] = self.max_tokens
             else:
                 params["max_tokens"] = self.max_tokens
                 params["temperature"] = (
@@ -425,52 +593,45 @@ class LLM:
                 response = await self.client.chat.completions.create(
                     **params, stream=False
                 )
-
                 if not response.choices or not response.choices[0].message.content:
                     raise ValueError("Empty or invalid response from LLM")
-
-                # Update token counts
-                self.update_token_count(
+                # Update token counts.
+                await self.update_token_count(
                     response.usage.prompt_tokens, response.usage.completion_tokens
                 )
-
                 return response.choices[0].message.content
 
-            # Streaming request, For streaming, update estimated token count before making the request
-            self.update_token_count(input_tokens)
-
+            # Streaming request.
+            await self.update_token_count(input_tokens)
             response = await self.client.chat.completions.create(**params, stream=True)
-
-            collected_messages = []
-            completion_text = ""
+            collected_messages: list[str] = []
+            output_text = ""
             async for chunk in response:
-                chunk_message = chunk.choices[0].delta.content or ""
-                collected_messages.append(chunk_message)
-                completion_text += chunk_message
-                print(chunk_message, end="", flush=True)
-
-            print()  # Newline after streaming
+                chunk_msg = chunk.choices[0].delta.content or ""
+                collected_messages.append(chunk_msg)
+                output_text += chunk_msg
+                print(chunk_msg, end="", flush=True)
+            print()  # Newline after streaming.
             full_response = "".join(collected_messages).strip()
             if not full_response:
                 raise ValueError("Empty response from streaming LLM")
 
-            # estimate completion tokens for streaming response
-            completion_tokens = self.count_tokens(completion_text)
+            # Estimate output token usage.
+            output_tokens = self.count_tokens(output_text)
             logger.info(
-                f"Estimated completion tokens for streaming response: {completion_tokens}"
+                f"Estimated output tokens for streaming response: {output_tokens}"
             )
-            self.total_completion_tokens += completion_tokens
-
+            # Update tracked output tokens.
+            await self.update_token_count(0, output_tokens)
             return full_response
 
         except TokenLimitExceeded:
-            # Re-raise token limit errors without logging
             raise
         except ValueError:
-            logger.exception(f"Validation error")
+            logger.exception("Validation error in ask")
             raise
         except OpenAIError as oe:
-            logger.exception(f"OpenAI API error")
+            logger.exception("OpenAI API error in ask")
             if isinstance(oe, AuthenticationError):
                 logger.error("Authentication failed. Check API key.")
             elif isinstance(oe, RateLimitError):
@@ -479,7 +640,7 @@ class LLM:
                 logger.error(f"API error: {oe}")
             raise
         except Exception:
-            logger.exception(f"Unexpected error in ask")
+            logger.exception("Unexpected error in ask")
             raise
 
     @retry(
@@ -491,11 +652,11 @@ class LLM:
     )
     async def ask_with_images(
         self,
-        messages: List[Union[dict, Message]],
-        images: List[Union[str, dict]],
-        system_msgs: Optional[List[Union[dict, Message]]] = None,
+        messages: list[dict | Message],
+        images: list[str | dict],
+        system_msgs: list[dict | Message] | None = None,
         stream: bool = False,
-        temperature: Optional[float] = None,
+        temperature: float | None = None,
     ) -> str:
         """
         Send a prompt with images to the LLM and get the response.
@@ -521,7 +682,7 @@ class LLM:
             # this method should only be called with models that support images
             if self.model not in MULTIMODAL_MODELS:
                 raise ValueError(
-                    f"Model {self.model} does not support images. Use a model from {MULTIMODAL_MODELS}"
+                    f"Model {self.model} does not support images. Use one of: {MULTIMODAL_MODELS}"
                 )
 
             # Format messages with image support
@@ -538,12 +699,10 @@ class LLM:
 
             # Convert content to multimodal format if needed
             content = last_message["content"]
-            multimodal_content = (
+            multimodal_content: list[dict] = (
                 [{"type": "text", "text": content}]
                 if isinstance(content, str)
-                else content
-                if isinstance(content, list)
-                else []
+                else content if isinstance(content, list) else []
             )
 
             # Add images to content
@@ -573,11 +732,20 @@ class LLM:
 
             # Calculate tokens and check limits
             input_tokens = self.count_message_tokens(all_messages)
-            if not self.check_token_limit(input_tokens):
-                raise TokenLimitExceeded(self.get_limit_error_message(input_tokens))
+            if self.itpm_limit is not None and input_tokens > self.itpm_limit:
+                all_messages = self.truncate_messages(all_messages)
+                input_tokens = self.count_message_tokens(all_messages)
 
-            # Set up API parameters
-            params = {
+            if self.itpm_limit is not None:
+                await self.wait_for_token_availability(
+                    input_tokens, self.input_token_tracker, self.itpm_limit
+                )
+            if self.otpm_limit is not None:
+                await self.wait_for_token_availability(
+                    self.max_tokens, self.output_token_tracker, self.otpm_limit
+                )
+
+            params: dict = {
                 "model": self.model,
                 "messages": all_messages,
                 "stream": stream,
@@ -585,7 +753,7 @@ class LLM:
 
             # Add model-specific parameters
             if self.model in REASONING_MODELS:
-                params["max_completion_tokens"] = self.max_tokens
+                params["max_output_tokens"] = self.max_tokens
             else:
                 params["max_tokens"] = self.max_tokens
                 params["temperature"] = (
@@ -595,29 +763,23 @@ class LLM:
             # Handle non-streaming request
             if not stream:
                 response = await self.client.chat.completions.create(**params)
-
                 if not response.choices or not response.choices[0].message.content:
                     raise ValueError("Empty or invalid response from LLM")
-
-                self.update_token_count(response.usage.prompt_tokens)
+                await self.update_token_count(response.usage.prompt_tokens)
                 return response.choices[0].message.content
 
             # Handle streaming request
-            self.update_token_count(input_tokens)
+            await self.update_token_count(input_tokens)
             response = await self.client.chat.completions.create(**params)
-
-            collected_messages = []
+            collected_messages: list[str] = []
             async for chunk in response:
-                chunk_message = chunk.choices[0].delta.content or ""
-                collected_messages.append(chunk_message)
-                print(chunk_message, end="", flush=True)
-
+                chunk_msg = chunk.choices[0].delta.content or ""
+                collected_messages.append(chunk_msg)
+                print(chunk_msg, end="", flush=True)
             print()  # Newline after streaming
             full_response = "".join(collected_messages).strip()
-
             if not full_response:
                 raise ValueError("Empty response from streaming LLM")
-
             return full_response
 
         except TokenLimitExceeded:
@@ -626,7 +788,7 @@ class LLM:
             logger.error(f"Validation error in ask_with_images: {ve}")
             raise
         except OpenAIError as oe:
-            logger.error(f"OpenAI API error: {oe}")
+            logger.error(f"OpenAI API error in ask_with_images: {oe}")
             if isinstance(oe, AuthenticationError):
                 logger.error("Authentication failed. Check API key.")
             elif isinstance(oe, RateLimitError):
@@ -647,12 +809,12 @@ class LLM:
     )
     async def ask_tool(
         self,
-        messages: List[Union[dict, Message]],
-        system_msgs: Optional[List[Union[dict, Message]]] = None,
+        messages: list[dict | Message],
+        system_msgs: list[dict | Message] | None = None,
         timeout: int = 300,
-        tools: Optional[List[dict]] = None,
+        tools: list[dict] | None = None,
         tool_choice: TOOL_CHOICE_TYPE = ToolChoice.AUTO,  # type: ignore
-        temperature: Optional[float] = None,
+        temperature: float | None = None,
         **kwargs,
     ) -> ChatCompletionMessage | None:
         """
@@ -699,23 +861,29 @@ class LLM:
             if tools:
                 for tool in tools:
                     tools_tokens += self.count_tokens(str(tool))
-
             input_tokens += tools_tokens
 
+            if self.itpm_limit is not None and input_tokens > self.itpm_limit:
+                messages = self.truncate_messages(messages)
+                input_tokens = self.count_message_tokens(messages)
+
             # Check if token limits are exceeded
-            if not self.check_token_limit(input_tokens):
-                error_message = self.get_limit_error_message(input_tokens)
-                # Raise a special exception that won't be retried
-                raise TokenLimitExceeded(error_message)
+            if self.itpm_limit is not None:
+                await self.wait_for_token_availability(
+                    input_tokens, self.input_token_tracker, self.itpm_limit
+                )
+            if self.otpm_limit is not None:
+                await self.wait_for_token_availability(
+                    self.max_tokens, self.output_token_tracker, self.otpm_limit
+                )
 
             # Validate tools if provided
             if tools:
                 for tool in tools:
                     if not isinstance(tool, dict) or "type" not in tool:
-                        raise ValueError("Each tool must be a dict with 'type' field")
+                        raise ValueError("Each tool must be a dict with a 'type' field")
 
-            # Set up the completion request
-            params = {
+            params: dict = {
                 "model": self.model,
                 "messages": messages,
                 "tools": tools,
@@ -723,30 +891,27 @@ class LLM:
                 "timeout": timeout,
                 **kwargs,
             }
-
             if self.model in REASONING_MODELS:
-                params["max_completion_tokens"] = self.max_tokens
+                params["max_output_tokens"] = self.max_tokens
             else:
                 params["max_tokens"] = self.max_tokens
                 params["temperature"] = (
                     temperature if temperature is not None else self.temperature
                 )
 
-            response: ChatCompletion = await self.client.chat.completions.create(
+            response: ChatCompletionMessage = await self.client.chat.completions.create(
                 **params, stream=False
             )
 
             # Check if response is valid
             if not response.choices or not response.choices[0].message:
                 print(response)
-                # raise ValueError("Invalid or empty response from LLM")
                 return None
 
             # Update token counts
-            self.update_token_count(
+            await self.update_token_count(
                 response.usage.prompt_tokens, response.usage.completion_tokens
             )
-
             return response.choices[0].message
 
         except TokenLimitExceeded:
@@ -756,13 +921,16 @@ class LLM:
             logger.error(f"Validation error in ask_tool: {ve}")
             raise
         except OpenAIError as oe:
-            logger.error(f"OpenAI API error: {oe}")
+            logger.error(f"OpenAI API error in ask_tool: {oe}")
             if isinstance(oe, AuthenticationError):
                 logger.error("Authentication failed. Check API key.")
             elif isinstance(oe, RateLimitError):
                 logger.error("Rate limit exceeded. Consider increasing retry attempts.")
             elif isinstance(oe, APIError):
                 logger.error(f"API error: {oe}")
+                logger.error(f"Response: {oe.response.text}")
+                logger.error(f"Headers: {oe.response.headers}")
+                logger.error(f"params: {params}")
             raise
         except Exception as e:
             logger.error(f"Unexpected error in ask_tool: {e}")
