@@ -21,6 +21,7 @@ from tenacity import (
     wait_random_exponential,
 )
 
+from app.bedrock import BedrockClient
 from app.config import LLMSettings, config
 from app.exceptions import TokenLimitExceeded
 from app.logger import logger  # Assuming a logger is set up in your app
@@ -31,7 +32,6 @@ from app.schema import (
     Message,
     ToolChoice,
 )
-
 
 REASONING_MODELS = ["o1", "o3-mini"]
 MULTIMODAL_MODELS = [
@@ -227,12 +227,12 @@ class LLM:
         # Trackers for token-based rate limits.
         self.requests_tracker: Deque[float] = deque()  # Requests last minute.
         self.token_tracker: Deque[Tuple[float, int]] = deque()  # General tracker.
-        self.input_token_tracker: Deque[
-            Tuple[float, int]
-        ] = deque()  # Input tokens per minute.
-        self.output_token_tracker: Deque[
-            Tuple[float, int]
-        ] = deque()  # Output tokens per minute.
+        self.input_token_tracker: Deque[Tuple[float, int]] = (
+            deque()
+        )  # Input tokens per minute.
+        self.output_token_tracker: Deque[Tuple[float, int]] = (
+            deque()
+        )  # Output tokens per minute.
 
         # Lock for updating trackers.
         self._tracker_lock = asyncio.Lock()
@@ -243,14 +243,16 @@ class LLM:
         except KeyError:
             self.tokenizer = tiktoken.get_encoding("cl100k_base")
 
-        if self.api_type == "azure":
-            self.client = AsyncAzureOpenAI(
-                base_url=self.base_url,
-                api_key=self.api_key,
-                api_version=self.api_version,
-            )
-        else:
-            self.client = AsyncOpenAI(api_key=self.api_key, base_url=self.base_url)
+            if self.api_type == "azure":
+                self.client = AsyncAzureOpenAI(
+                    base_url=self.base_url,
+                    api_key=self.api_key,
+                    api_version=self.api_version,
+                )
+            elif self.api_type == "aws":
+                self.client = BedrockClient()
+            else:
+                self.client = AsyncOpenAI(api_key=self.api_key, base_url=self.base_url)
 
         self.token_counter = TokenCounter(self.tokenizer)
 
@@ -703,9 +705,7 @@ class LLM:
             multimodal_content: list[dict] = (
                 [{"type": "text", "text": content}]
                 if isinstance(content, str)
-                else content
-                if isinstance(content, list)
-                else []
+                else content if isinstance(content, list) else []
             )
 
             # Add images to content
