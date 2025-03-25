@@ -80,6 +80,7 @@ temperature = 0.0                          # Controls randomness for vision mode
 # Maximum number of times to retry all engines when all fail. Default is 3.
 #max_retries = 3
 
+[search.google]
 # Google Custom Search JSON API credentials
 # Get API key: https://developers.google.com/custom-search/v1/overview
 # Get CX: https://programmablesearchengine.google.com/controlpanel/all
