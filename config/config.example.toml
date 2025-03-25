@@ -1,10 +1,10 @@
 # Global LLM configuration
 [llm]
-model = "claude-3-7-sonnet-20250219"        # The LLM model to use
-base_url = "https://api.anthropic.com/v1/"  # API endpoint URL
-api_key = "YOUR_API_KEY"                    # Your API key
-max_tokens = 8192                           # Maximum number of tokens in the response
-temperature = 0.0                           # Controls randomness
+model = "claude-3-7-sonnet-20250219"       # The LLM model to use
+base_url = "https://api.anthropic.com/v1/" # API endpoint URL
+api_key = "YOUR_API_KEY"                   # Your API key
+max_tokens = 8192                          # Maximum number of tokens in the response
+temperature = 0.0                          # Controls randomness
 
 # [llm] # Amazon Bedrock
 # api_type = "aws"                                       # Required
@@ -33,11 +33,11 @@ temperature = 0.0                           # Controls randomness
 
 # Optional configuration for specific LLM models
 [llm.vision]
-model = "claude-3-7-sonnet-20250219"        # The vision model to use
-base_url = "https://api.anthropic.com/v1/"  # API endpoint URL for vision model
-api_key = "YOUR_API_KEY"                    # Your API key for vision model
-max_tokens = 8192                           # Maximum number of tokens in the response
-temperature = 0.0                           # Controls randomness for vision model
+model = "claude-3-7-sonnet-20250219"       # The vision model to use
+base_url = "https://api.anthropic.com/v1/" # API endpoint URL for vision model
+api_key = "YOUR_API_KEY"                   # Your API key for vision model
+max_tokens = 8192                          # Maximum number of tokens in the response
+temperature = 0.0                          # Controls randomness for vision model
 
 # [llm.vision] #OLLAMA VISION:
 # api_type = 'ollama'
@@ -79,6 +79,14 @@ temperature = 0.0                           # Controls randomness for vision mod
 #retry_delay = 60
 # Maximum number of times to retry all engines when all fail. Default is 3.
 #max_retries = 3
+
+# Google Custom Search JSON API credentials
+# Get API key: https://developers.google.com/custom-search/v1/overview
+# Get CX: https://programmablesearchengine.google.com/controlpanel/all
+api_key = "your-api-key-here"
+cx = "your-search-engine-id-here"
+# Set true to use official API instead of scraping
+use_api = false
 
 
 ## Sandbox configuration

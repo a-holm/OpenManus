@@ -35,6 +35,19 @@ class ProxySettings(BaseModel):
     password: Optional[str] = Field(None, description="Proxy password")
 
 
+class GoogleSearchSettings(BaseModel):
+    """Configuration for Google Search API"""
+
+    use_api: bool = Field(
+        False,
+        description="Whether to use Google Custom Search JSON API instead of scraping",
+    )
+    api_key: Optional[str] = Field(
+        None, description="Google Custom Search JSON API key"
+    )
+    cx: Optional[str] = Field(None, description="Google Custom Search Engine ID")
+
+
 class SearchSettings(BaseModel):
     engine: str = Field(default="Google", description="Search engine the llm to use")
     fallback_engines: List[str] = Field(
@@ -48,6 +61,9 @@ class SearchSettings(BaseModel):
     max_retries: int = Field(
         default=3,
         description="Maximum number of times to retry all engines when all fail",
+    )
+    google: Optional[GoogleSearchSettings] = Field(
+        None, description="Google-specific search configuration"
     )
 
 
@@ -160,12 +176,12 @@ class Config:
             "api_version": base_llm.get("api_version", ""),
         }
 
-        # handle browser config.
+        # handle browser config
         browser_config = raw_config.get("browser", {})
         browser_settings = None
 
         if browser_config:
-            # handle proxy settings.
+            # handle proxy settings
             proxy_config = browser_config.get("proxy", {})
             proxy_settings = None
 
@@ -178,25 +194,33 @@ class Config:
                     }
                 )
 
-            # filter valid browser config parameters.
             valid_browser_params = {
                 k: v
                 for k, v in browser_config.items()
                 if k in BrowserSettings.__annotations__ and v is not None
             }
 
-            # if there is proxy settings, add it to the parameters.
             if proxy_settings:
                 valid_browser_params["proxy"] = proxy_settings
 
-            # only create BrowserSettings when there are valid parameters.
             if valid_browser_params:
                 browser_settings = BrowserSettings(**valid_browser_params)
 
+        # handle search config
         search_config = raw_config.get("search", {})
         search_settings = None
         if search_config:
-            search_settings = SearchSettings(**search_config)
+            google_config = search_config.get("google", {})
+            google_settings = None
+            if google_config:
+                google_settings = GoogleSearchSettings(**google_config)
+
+            search_settings = SearchSettings(
+                **{k: v for k, v in search_config.items() if k != "google"}
+            )
+            if google_settings:
+                search_settings.google = google_settings
+
         sandbox_config = raw_config.get("sandbox", {})
         if sandbox_config:
             sandbox_settings = SandboxSettings(**sandbox_config)
