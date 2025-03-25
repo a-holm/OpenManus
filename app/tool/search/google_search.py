@@ -13,7 +13,7 @@ class GoogleSearchEngine(WebSearchEngine):
 
     def __init__(self):
         self.api_enabled = config.search_config.google.use_api
-        self.api_key = config.search_config.google.api_key
+        self.api_key = config.search_config.google.googlesearch_api_key
         self.cx = config.search_config.google.cx
 
         if self.api_enabled and (not self.api_key or not self.cx):

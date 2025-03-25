@@ -42,7 +42,7 @@ class GoogleSearchSettings(BaseModel):
         False,
         description="Whether to use Google Custom Search JSON API instead of scraping",
     )
-    api_key: Optional[str] = Field(
+    googlesearch_api_key: Optional[str] = Field(
         None, description="Google Custom Search JSON API key"
     )
     cx: Optional[str] = Field(None, description="Google Custom Search Engine ID")
