@@ -4,7 +4,7 @@ import requests
 from googlesearch import search
 
 from app.config import config
-from app.exceptions import ToolConfigurationError
+from app.exceptions import ToolError
 from app.tool.search.base import WebSearchEngine
 
 
@@ -17,7 +17,7 @@ class GoogleSearchEngine(WebSearchEngine):
         self.cx = config.search_config.google.cx
 
         if self.api_enabled and (not self.api_key or not self.cx):
-            raise ToolConfigurationError(
+            raise ToolError(
                 "Google Search API requires both api_key and cx to be configured"
             )
 
@@ -42,7 +42,7 @@ class GoogleSearchEngine(WebSearchEngine):
         except requests.exceptions.RequestException as e:
             if not self.api_enabled:
                 return []
-            raise ToolConfigurationError(f"Google API request failed: {str(e)}") from e
+            raise ToolError(f"Google API request failed: {str(e)}") from e
 
     def perform_search(
         self, query: str, num_results: int = 10, *args, **kwargs
