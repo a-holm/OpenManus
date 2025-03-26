@@ -1,5 +1,4 @@
 import os
-from pathlib import Path
 
 from app.config import PROJECT_ROOT
 from app.logger import logger
