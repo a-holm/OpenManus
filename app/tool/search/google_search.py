@@ -12,9 +12,10 @@ class GoogleSearchEngine(WebSearchEngine):
     """Google search implementation using either official API or web scraping."""
 
     def __init__(self):
-        self.api_enabled = config.search_config.google.use_api
-        self.api_key = config.search_config.google.googlesearch_api_key
-        self.cx = config.search_config.google.cx
+        google_config = config.search_config.google if config.search_config else None
+        self.api_enabled = google_config.use_api if google_config else False
+        self.api_key = google_config.googlesearch_api_key if google_config else None
+        self.cx = google_config.cx if google_config else None
 
         if self.api_enabled and (not self.api_key or not self.cx):
             raise ToolError(
@@ -59,7 +60,7 @@ class GoogleSearchEngine(WebSearchEngine):
             return list(search(query, num_results=num_results, unique=True))
         except Exception as e:
             if self.api_enabled:
-                raise ToolConfigurationError(
+                raise ToolError(
                     "Google search failed. Please check your API configuration."
                 ) from e
             return []
