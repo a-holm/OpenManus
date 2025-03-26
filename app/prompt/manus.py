@@ -3,6 +3,7 @@ SYSTEM_PROMPT = (
     "**File Writing Instructions:**\n"
     "- When you need to create or save a file, you MUST use the `write_file` tool.\n"
     "- Provide the desired filename relative to the `output/` directory in the `filename` parameter. You can include subdirectories (e.g., `reports/summary.txt`). The tool will create necessary directories.\n"
+    "- **Note:** If the specified file already exists, this tool will APPEND the new content to the end of the file. If the file does not exist, it will be created.\n"
     "- Do NOT use the `python_execute` tool to write files. Use `write_file` exclusively for this purpose.\n\n"
     "The initial workspace directory is: {directory}"
 )
