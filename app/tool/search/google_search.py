@@ -22,7 +22,12 @@ class GoogleSearchEngine(WebSearchEngine):
                 "Google Search API requires both api_key and cx to be configured"
             )
 
-    def _api_search(self, query: str, num_results: int) -> List[SearchItem]:
+    def _api_search(
+        self,
+        query: str,
+        num_results: int,
+        url: str = "https://www.googleapis.com/customsearch/v1",
+    ) -> List[SearchItem]:
         """Search using Google Custom Search JSON API.
 
         Args:
@@ -35,7 +40,6 @@ class GoogleSearchEngine(WebSearchEngine):
         Raises:
             ToolError: If API request fails and API is enabled
         """
-        url = "https://www.googleapis.com/customsearch/v1"
         params = {
             "key": self.api_key,
             "cx": self.cx,
@@ -74,14 +78,24 @@ class GoogleSearchEngine(WebSearchEngine):
 
         try:
             raw_results = search(query, num_results=num_results, advanced=True)
-            return [
-                SearchItem(
-                    title=item.title if hasattr(item, "title") else f"Result {i+1}",
-                    url=item.url if hasattr(item, "url") else item,
-                    description=getattr(item, "description", ""),
-                )
-                for i, item in enumerate(raw_results)
-            ]
+            results = []
+            for i, item in enumerate(raw_results):
+                if isinstance(item, str):
+                    # If it's just a URL
+                    results.append(
+                        {
+                            "title": f"Google Result {i+1}",
+                            "url": item,
+                            "description": "",
+                        }
+                    )
+                else:
+                    results.append(
+                        SearchItem(
+                            title=item.title, url=item.url, description=item.description
+                        )
+                    )
+            return results
         except Exception as e:
             if self.api_enabled:
                 raise ToolError(

@@ -185,12 +185,12 @@ class Config:
             "api_version": base_llm.get("api_version", ""),
         }
 
-        # handle browser config
+        # handle browser config.
         browser_config = raw_config.get("browser", {})
         browser_settings = None
 
         if browser_config:
-            # handle proxy settings
+            # handle proxy settings.
             proxy_config = browser_config.get("proxy", {})
             proxy_settings = None
 
@@ -203,15 +203,18 @@ class Config:
                     }
                 )
 
+            # filter valid browser config parameters.
             valid_browser_params = {
                 k: v
                 for k, v in browser_config.items()
                 if k in BrowserSettings.__annotations__ and v is not None
             }
 
+            # if there is proxy settings, add it to the parameters.
             if proxy_settings:
                 valid_browser_params["proxy"] = proxy_settings
 
+            # only create BrowserSettings when there are valid parameters.
             if valid_browser_params:
                 browser_settings = BrowserSettings(**valid_browser_params)
 
@@ -219,16 +222,7 @@ class Config:
         search_config = raw_config.get("search", {})
         search_settings = None
         if search_config:
-            google_config = search_config.get("google", {})
-            google_settings = None
-            if google_config:
-                google_settings = GoogleSearchSettings(**google_config)
-
-            search_settings = SearchSettings(
-                **{k: v for k, v in search_config.items() if k != "google"}
-            )
-            if google_settings:
-                search_settings.google = google_settings
+            search_settings = SearchSettings(**search_config)
 
         sandbox_config = raw_config.get("sandbox", {})
         if sandbox_config:
