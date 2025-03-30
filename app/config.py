@@ -222,7 +222,16 @@ class Config:
         search_config = raw_config.get("search", {})
         search_settings = None
         if search_config:
-            search_settings = SearchSettings(**search_config)
+            google_config = search_config.get("google", {})
+            google_settings = None
+            if google_config:
+                google_settings = GoogleSearchSettings(**google_config)
+
+            search_settings = SearchSettings(
+                **{k: v for k, v in search_config.items() if k != "google"}
+            )
+            if google_settings:
+                search_settings.google = google_settings
 
         sandbox_config = raw_config.get("sandbox", {})
         if sandbox_config:
