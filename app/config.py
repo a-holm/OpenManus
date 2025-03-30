@@ -61,6 +61,14 @@ class SearchSettings(BaseModel):
         default=3,
         description="Maximum number of times to retry all engines when all fail",
     )
+    lang: str = Field(
+        default="en",
+        description="Language code for search results (e.g., en, zh, fr)",
+    )
+    country: str = Field(
+        default="us",
+        description="Country code for search results (e.g., us, cn, uk)",
+    )
     google: Optional[GoogleSearchSettings] = Field(
         None, description="Google specific search settings"
     )
