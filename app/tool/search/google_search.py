@@ -1,6 +1,8 @@
 from typing import List
+
 import requests
 from googlesearch import search
+
 from app.config import config
 from app.exceptions import ToolError
 from app.tool.search.base import SearchItem, WebSearchEngine
@@ -22,14 +24,14 @@ class GoogleSearchEngine(WebSearchEngine):
 
     def _api_search(self, query: str, num_results: int) -> List[SearchItem]:
         """Search using Google Custom Search JSON API.
-        
+
         Args:
             query: Search query string
             num_results: Maximum number of results to return
-            
+
         Returns:
             List of SearchItem objects with title, url, and description
-            
+
         Raises:
             ToolError: If API request fails and API is enabled
         """
@@ -38,23 +40,23 @@ class GoogleSearchEngine(WebSearchEngine):
             "key": self.api_key,
             "cx": self.cx,
             "q": query,
-            "num": min(num_results, 10)  # API max is 10 results per request
+            "num": min(num_results, 10),  # API max is 10 results per request
         }
 
         try:
             response = requests.get(url, params=params)
             response.raise_for_status()
             results = response.json()
-            
+
             return [
                 SearchItem(
                     title=item.get("title", f"Result {i+1}"),
                     url=item["link"],
-                    description=item.get("snippet", "")
+                    description=item.get("snippet", ""),
                 )
                 for i, item in enumerate(results.get("items", []))
             ]
-            
+
         except requests.exceptions.RequestException as e:
             if not self.api_enabled:
                 return []
@@ -64,7 +66,7 @@ class GoogleSearchEngine(WebSearchEngine):
         self, query: str, num_results: int = 10, *args, **kwargs
     ) -> List[SearchItem]:
         """Performs Google search and returns results as SearchItem objects.
-        
+
         Uses API if enabled, otherwise falls back to scraping.
         """
         if self.api_enabled:
@@ -76,7 +78,7 @@ class GoogleSearchEngine(WebSearchEngine):
                 SearchItem(
                     title=item.title if hasattr(item, "title") else f"Result {i+1}",
                     url=item.url if hasattr(item, "url") else item,
-                    description=getattr(item, "description", "")
+                    description=getattr(item, "description", ""),
                 )
                 for i, item in enumerate(raw_results)
             ]
