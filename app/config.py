@@ -35,19 +35,6 @@ class ProxySettings(BaseModel):
     password: Optional[str] = Field(None, description="Proxy password")
 
 
-class GoogleSearchSettings(BaseModel):
-    """Configuration for Google Search API"""
-
-    use_api: bool = Field(
-        False,
-        description="Whether to use Google Custom Search JSON API instead of scraping",
-    )
-    googlesearch_api_key: Optional[str] = Field(
-        None, description="Google Custom Search JSON API key"
-    )
-    cx: Optional[str] = Field(None, description="Google Custom Search Engine ID")
-
-
 class SearchSettings(BaseModel):
     engine: str = Field(default="Google", description="Search engine the llm to use")
     fallback_engines: List[str] = Field(
@@ -61,9 +48,6 @@ class SearchSettings(BaseModel):
     max_retries: int = Field(
         default=3,
         description="Maximum number of times to retry all engines when all fail",
-    )
-    google: Optional[GoogleSearchSettings] = Field(
-        None, description="Google-specific search configuration"
     )
 
 
@@ -222,17 +206,8 @@ class Config:
         search_config = raw_config.get("search", {})
         search_settings = None
         if search_config:
-            google_config = search_config.get("google", {})
-            google_settings = None
-            if google_config:
-                google_settings = GoogleSearchSettings(**google_config)
-
-            search_settings = SearchSettings(
-                **{k: v for k, v in search_config.items() if k != "google"}
-            )
-            if google_settings:
-                search_settings.google = google_settings
-
+            # Instantiate SearchSettings with all items from search_config
+            search_settings = SearchSettings(**search_config)
         sandbox_config = raw_config.get("sandbox", {})
         if sandbox_config:
             sandbox_settings = SandboxSettings(**sandbox_config)
